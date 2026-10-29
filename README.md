@@ -1,77 +1,28 @@
-# ForemanPluginTemplate
+# Foreman Ansible AAP
 
-This repo is an example plugin which you can use as a starting point for developing
-your own Foreman plugins
+An optional Foreman plugin that provides the experimental Ansible Automation
+Platform execution driver for `foreman_ansible`. Smart Proxy execution remains
+the default.
 
-## Getting Started
+## Installation
 
-First, clone this repo to a directory named for your new plugin
+Add the plugin alongside compatible `foreman_ansible` and
+`foreman_remote_execution` versions. This initial scaffold establishes the
+driver and aggregate execution seams; it does not yet launch AAP jobs.
 
-    git clone https://github.com/theforeman/foreman_plugin_template foreman_my_plugin
+## Usage
 
-Now use the provided script to rewrite all the files in the plugin
+Set the **Ansible execution driver** setting to **AAP (experimental)** for newly
+created Ansible Job Invocations. Each invocation retains the driver selected
+when it was created.
 
-    cd foreman_my_plugin
-    ./rename.rb foreman_my_plugin
+## Contributing
 
-The script will also output the required Bundler line to add the plugin to Foreman.
-Apply this change, and restart Foreman
-
-Once working, update the README with appropriate information, and publish your plugin!
-
-## Out of the box functionality
-
-This example plugin comes with:
-
-* A model and helper concern
-* An inherited controller
-* A route/view which displays the plugin name
-* A widget for the Dashboard
-* A plugin registration block adding permissions/roles/menu entry
-* A functioning example rake task
-* A functioning example test and factory
-* Functioning internationalization support
-
-These examples show how to add to Foreman in various ways.
-
-## Foreman plugin labeling
-
-With the following line in the ruby gemspec file the gem is marked, that it's a foreman plugin. 
-This is especially necessary if you are using React / JS stuff in webpack directory.
-
-```ruby
-    s.metadata    = { "is_foreman_plugin" => "true" }
-```
-
-### Further examples
-
-The [How to create a plugin](https://github.com/theforeman/foreman/blob/develop/developer_docs/how_to_create_a_plugin.asciidoc)
-wiki page contains a lot of information on supported plugin extension points in
-Foreman and how to use them from a plugin.
-
-### i18n
-
-From your Foreman checkout, run `rake plugin:gettext[foreman_plugin_example]` to
-extract the latest strings, and then inside the plugin checkout run `make -C locale
-tx-update` to pull and merge in the latest translations.  Do this regularly and
-before each release.
-
-Have your .pot file published in Foreman's Transifex project by contacting the
-development team below.
-
-[Translating](http://projects.theforeman.org/projects/foreman/wiki/Translating#Translating-for-developers)
-has more information about writing code with i18n support.
-
-## Getting help
-
-The Foreman developers IRC channel and mailing list are the best places to get help:
-
-* Freenode: #theforeman-dev
-* Community Discourse: <https://community.theforeman.org/>
+Fork and send a Pull Request. Thanks!
 
 ## Copyright
 
-Copyright (c) 2014 Red Hat
+Copyright (c) 2026 Foreman Ansible team
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by

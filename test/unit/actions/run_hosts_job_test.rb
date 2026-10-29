@@ -1,0 +1,73 @@
+# frozen_string_literal: true
+
+require 'test_plugin_helper'
+
+module ForemanAnsibleAap
+  class RunHostsJobTest < ActiveSupport::TestCase
+    let(:hosts) { [stub(id: 1), stub(id: 2)] }
+    let(:targeting) { stub(resolved?: true) }
+    let(:job_invocation) do
+      stub(
+        id: 42,
+        task_group: nil,
+        targeting: targeting,
+        job_category: 'Ansible Commands',
+        description: 'Run Ansible'
+      ).tap do |invocation|
+        invocation.stubs(:task_id).returns(nil)
+        invocation.stubs(:task_id=)
+        invocation.stubs(:save!)
+      end
+    end
+    let(:action) { Actions::ForemanAnsibleAap::RunHostsJob.allocate }
+
+    test 'does not apply Foreman concurrency control while planning' do
+      action.stubs(:task).returns(stub(add_missing_task_groups: nil))
+      action.expects(:action_subject).with(job_invocation)
+      action.expects(:plan_self).with(job_invocation_id: job_invocation.id)
+      action.expects(:limit_concurrency_level!).never
+
+      action.plan(job_invocation)
+    end
+
+    test 'plans every lightweight host task in one unbounded batch' do
+      action.stubs(:hosts).returns(hosts)
+      action.stubs(:current_batch).returns(hosts)
+      action.stubs(:job_invocation).returns(job_invocation)
+      template_invocation = stub(new_record?: true)
+      job_invocation.stubs(:pattern_template_invocation_for_host)
+                    .returns(stub(deep_clone: template_invocation))
+
+      assert_equal 2, action.batch_size
+      action.expects(:trigger).with do |action_class, invocation, host, planned_invocation|
+        action_class == Actions::ForemanAnsibleAap::RunHostJob &&
+          invocation == job_invocation &&
+          hosts.include?(host) &&
+          planned_invocation.new_record?
+      end.twice
+
+      assert_equal 2, action.create_sub_plans.size
+    end
+
+    test 'links each lightweight host task to its template invocation' do
+      host = hosts.first
+      template_invocation = mock('template invocation')
+      template_invocation.expects(:host_id=).with(host.id)
+      template_invocation.expects(:run_host_job_task_id=).with(7)
+      template_invocation.expects(:save!)
+      host_action = Actions::ForemanAnsibleAap::RunHostJob.allocate
+      host_action.stubs(:task).returns(stub(id: 7))
+      host_action.expects(:action_subject).with(
+        host,
+        job_category: job_invocation.job_category,
+        description: job_invocation.description,
+        job_invocation_id: job_invocation.id
+      )
+      host_action.expects(:link!).with(job_invocation)
+      host_action.expects(:link!).with(template_invocation)
+      host_action.expects(:plan_self)
+
+      host_action.plan(job_invocation, host, template_invocation)
+    end
+  end
+end

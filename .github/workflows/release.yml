@@ -1,5 +1,5 @@
 # The gem needs to be configured on rubygems.org to consider this workflow a trusted publisher
-# 1. Go to https://rubygems.org/gems/foreman_plugin_template/trusted_publishers
+# 1. Go to https://rubygems.org/gems/foreman_ansible_aap/trusted_publishers
 # 2. Click create
 # 3. Select GitHub Actions as Trusted publisher type
 # 4. Set repository owner and name

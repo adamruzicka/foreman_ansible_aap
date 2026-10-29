@@ -1,2 +1,2 @@
-# Matches foreman_plugin_template.gemspec
-_('TODO: Description of ForemanPluginTemplate.')
+# Matches foreman_ansible_aap.gemspec
+_('Adds an experimental Ansible Automation Platform execution driver to Foreman Ansible.')
