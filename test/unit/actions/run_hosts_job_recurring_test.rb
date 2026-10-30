@@ -56,6 +56,7 @@ module ForemanAnsibleAap
       )
 
       FactoryBot.build(:job_invocation, targeting: targeting).tap do |invocation|
+        invocation.job_category = template.job_category
         invocation.description = 'Recurring AAP execution'
         invocation.pattern_template_invocations << FactoryBot.build(
           :template_invocation,
