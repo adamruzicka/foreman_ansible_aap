@@ -28,7 +28,7 @@ module ForemanAnsibleAap
 
       result(remote_job, commit_sha)
     rescue StandardError => e
-      fail_prepared_hosts(e) unless @host_outcomes_settled
+      fail_prepared_hosts(e.message) unless @host_outcomes_settled
       raise
     end
 
@@ -112,6 +112,9 @@ module ForemanAnsibleAap
         aap_job_id: remote_job.fetch(:id),
         aap_job_url: remote_job.fetch(:url)
       )
+    rescue StandardError => e
+      raise AapClient::AmbiguousLaunchError,
+        "AAP job coordinates could not be persisted; AAP might still be executing: #{e.message}"
     end
 
     def wait_for_terminal(job_id)
@@ -133,9 +136,9 @@ module ForemanAnsibleAap
       failed_hosts
     end
 
-    def fail_prepared_hosts(error)
+    def fail_prepared_hosts(diagnostic)
       prepared_hosts.each do |host|
-        result_settler.failure!(host, diagnostic: nil, error: error.message)
+        result_settler.failure!(host, diagnostic: diagnostic, error: diagnostic)
       end
     end
 

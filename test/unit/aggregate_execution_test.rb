@@ -17,16 +17,26 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     end
   end
 
+  class RemotePersistenceFailureRecord < Record
+    def update!(attributes)
+      raise 'database unavailable' if attributes.key?(:aap_job_id)
+
+      super
+    end
+  end
+
   Invocation = Struct.new(:id)
 
   class Renderer
     attr_reader :invocations
 
-    def initialize
+    def initialize(trace = nil)
       @invocations = []
+      @trace = trace
     end
 
     def render(invocation)
+      @trace << :render if @trace
       @invocations << invocation
       "---\n- hosts: all\n"
     end
@@ -41,11 +51,13 @@ class AggregateExecutionTest < ActiveSupport::TestCase
   class Publisher
     attr_reader :publications
 
-    def initialize
+    def initialize(trace = nil)
       @publications = []
+      @trace = trace
     end
 
     def publish(attributes)
+      @trace << :publish if @trace
       @publications << attributes
       '7f83b1657ff1fc53b92dc18148a1d65dfa13514d'
     end
@@ -69,10 +81,12 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     end
 
     def preflight!(contract)
+      @trace << :preflight
       @preflights << contract
     end
 
     def launch(attributes)
+      @trace << :launch
       @launches << attributes
       { id: 91, url: 'https://aap.example.test/execution/jobs/playbook/91/' }
     end
@@ -125,6 +139,33 @@ class AggregateExecutionTest < ActiveSupport::TestCase
 
     def failure!(host, diagnostic:, error: diagnostic)
       @failed_hosts << [host, diagnostic]
+    end
+  end
+
+  class SafetyFailureRenderer < Renderer
+    def render(_invocation)
+      raise ForemanAnsibleAap::PlaybookRenderer::RenderingError, 'render failed safely'
+    end
+  end
+
+  class FailingPublisher < Publisher
+    def publish(_attributes)
+      raise ForemanAnsibleAap::GitPublisher::PublicationError, 'publication failed safely'
+    end
+  end
+
+  class FailingLaunchClient < AapClient
+    attr_reader :launch_attempts
+
+    def initialize(execution_record, trace, error)
+      super(execution_record, trace)
+      @error = error
+      @launch_attempts = 0
+    end
+
+    def launch(_attributes)
+      @launch_attempts += 1
+      raise @error
     end
   end
 
@@ -199,6 +240,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     assert_equal [91, 91, 91, 91], aap_client.status_requests
     assert_equal [91, 91, 91, 91], event_ingestor.jobs
     assert_equal %i[
+      preflight launch
       status_queued events
       status_waiting events
       status_running events
@@ -214,6 +256,99 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       aap_job_url: 'https://aap.example.test/execution/jobs/playbook/91/',
     }, execution_record.attributes)
     assert_equal 91, result.job_id
+  end
+
+  test 'fails every prepared host with the same diagnostic after a definitive local or launch failure' do
+    hosts = [Host.new('node-1.example.test'), Host.new('node-2.example.test')]
+    failures = [
+      [SafetyFailureRenderer.new, Publisher.new, AapClient.new(Record.new, []), /render failed safely/],
+      [Renderer.new, FailingPublisher.new, AapClient.new(Record.new, []), /publication failed safely/],
+      [
+        Renderer.new,
+        Publisher.new,
+        FailingLaunchClient.new(
+          Record.new,
+          [],
+          ForemanAnsibleAap::AapClient::DefinitiveLaunchError.new('launch rejected safely')
+        ),
+        /launch rejected safely/,
+      ],
+    ]
+
+    failures.each do |renderer, publisher, aap_client, expected_message|
+      settler = ResultSettler.new
+      error = assert_raises(StandardError) do
+        aggregate(
+          hosts: hosts,
+          renderer: renderer,
+          publisher: publisher,
+          aap_client: aap_client,
+          settler: settler
+        ).call
+      end
+
+      assert_match expected_message, error.message
+      assert_equal hosts, settler.failed_hosts.map(&:first)
+      assert_equal 1, settler.failed_hosts.map(&:last).uniq.size
+    end
+  end
+
+  test 'preflights after preparation and before rendering or publication' do
+    hosts = [Host.new('node-1.example.test')]
+    trace = []
+    record = Record.new
+
+    aggregate(
+      hosts: hosts,
+      execution_record: record,
+      renderer: Renderer.new(trace),
+      publisher: Publisher.new(trace),
+      aap_client: AapClient.new(record, trace)
+    ).call
+
+    assert_equal %i[preflight render publish launch], trace.first(4)
+  end
+
+  test 'fails hard with a prominent warning and one launch attempt after an ambiguous launch' do
+    hosts = [Host.new('node-1.example.test'), Host.new('node-2.example.test')]
+    aap_client = FailingLaunchClient.new(
+      Record.new,
+      [],
+      ForemanAnsibleAap::AapClient::AmbiguousLaunchError.new(
+        'AAP launch could not be confirmed; AAP might still be executing'
+      )
+    )
+    settler = ResultSettler.new
+
+    error = assert_raises(ForemanAnsibleAap::AapClient::AmbiguousLaunchError) do
+      aggregate(hosts: hosts, aap_client: aap_client, settler: settler).call
+    end
+
+    assert_match(/AAP might still be executing/, error.message)
+    assert_equal 1, aap_client.launch_attempts
+    assert_equal hosts, settler.failed_hosts.map(&:first)
+  end
+
+  test 'treats failure to persist returned job coordinates as an ambiguous launch' do
+    hosts = [Host.new('node-1.example.test'), Host.new('node-2.example.test')]
+    record = RemotePersistenceFailureRecord.new
+    aap_client = AapClient.new(record, [])
+    settler = ResultSettler.new
+
+    error = assert_raises(ForemanAnsibleAap::AapClient::AmbiguousLaunchError) do
+      aggregate(
+        hosts: hosts,
+        execution_record: record,
+        aap_client: aap_client,
+        settler: settler
+      ).call
+    end
+
+    assert_match(/could not be persisted/, error.message)
+    assert_match(/AAP might still be executing/, error.message)
+    assert_equal 1, aap_client.launches.size
+    assert_empty aap_client.status_requests
+    assert_equal hosts, settler.failed_hosts.map(&:first)
   end
 
   test 'limits the aggregate launch to the successfully prepared subset' do
@@ -317,7 +452,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
 
     assert_equal 'playbook syntax error before host execution', error.message
     assert_empty settler.successful_hosts
-    assert_equal hosts.map { |host| [host, nil] }, settler.failed_hosts
+    assert_equal hosts.map { |host| [host, 'playbook syntax error before host execution'] }, settler.failed_hosts
   end
 
   test 'host summary failure overrides a successful aggregate status' do
@@ -382,6 +517,17 @@ class AggregateExecutionTest < ActiveSupport::TestCase
   private
 
   def build_execution(execution_record, hosts, aap_client, settler, renderer: Renderer.new)
+    aggregate(
+      hosts: hosts,
+      execution_record: execution_record,
+      renderer: renderer,
+      aap_client: aap_client,
+      settler: settler
+    )
+  end
+
+  def aggregate(hosts:, execution_record: Record.new, renderer: Renderer.new, publisher: Publisher.new,
+      aap_client: AapClient.new(Record.new, []), settler: ResultSettler.new)
     configuration = ForemanAnsibleAap::Configuration.new(
       controller_url: 'https://aap.example.test',
       service_token: 'controller-secret',
@@ -404,7 +550,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       configuration: configuration,
       dependencies: {
         renderer: renderer,
-        publisher: Publisher.new,
+        publisher: publisher,
         aap_client: aap_client,
         event_ingestor: EventIngestor.new([]),
         result_settler: settler,
