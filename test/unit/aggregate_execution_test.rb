@@ -32,6 +32,12 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     end
   end
 
+  class FailingRenderer
+    def render(_invocation)
+      raise 'playbook syntax error before host execution'
+    end
+  end
+
   class Publisher
     attr_reader :publications
 
@@ -48,13 +54,18 @@ class AggregateExecutionTest < ActiveSupport::TestCase
   class AapClient
     attr_reader :preflights, :launches, :status_requests, :summary_requests
 
-    def initialize(execution_record)
+    def initialize(execution_record, trace = [], statuses: %w[queued waiting running successful], summaries: nil)
       @execution_record = execution_record
+      @trace = trace
       @preflights = []
       @launches = []
       @status_requests = []
       @summary_requests = []
-      @statuses = %w[queued waiting running successful]
+      @statuses = statuses
+      @summaries = summaries || [
+        { host_name: 'node-1.example.test', successful: true },
+        { host_name: 'node-2.example.test', successful: true },
+      ]
     end
 
     def preflight!(contract)
@@ -69,21 +80,34 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     def job_status(job_id)
       assert_job_was_persisted
       @status_requests << job_id
-      @statuses.shift
+      status = @statuses.shift
+      @trace << "status_#{status}".to_sym
+      status
     end
 
     def host_summaries(job_id)
       @summary_requests << job_id
-      [
-        { host_name: 'node-1.example.test', successful: true },
-        { host_name: 'node-2.example.test', successful: true },
-      ]
+      @summaries
     end
 
     private
 
     def assert_job_was_persisted
       raise 'polled before persisting the AAP job' unless @execution_record.attributes[:aap_job_id] == 91
+    end
+  end
+
+  class EventIngestor
+    attr_reader :jobs
+
+    def initialize(trace)
+      @trace = trace
+      @jobs = []
+    end
+
+    def ingest(job_id)
+      @jobs << job_id
+      @trace << :events
     end
   end
 
@@ -99,19 +123,12 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       @successful_hosts << host
     end
 
-    def fail_all!(hosts, error)
-      @failed_hosts.concat(hosts.map { |host| [host, error] })
+    def failure!(host, diagnostic:, error: diagnostic)
+      @failed_hosts << [host, diagnostic]
     end
   end
 
-  class FailingRenderer
-    def render(_invocation)
-      raise ForemanAnsibleAap::PlaybookRenderer::RenderingError,
-        'Host-specific template data is unavailable without a current host'
-    end
-  end
-
-  test 'renders, publishes, and launches once before settling all prepared hosts' do
+  test 'streams active output and performs a final catch-up before settling prepared hosts' do
     invocation = Invocation.new(42)
     execution_record = Record.new
     hosts = [Host.new('node-1.example.test'), Host.new('node-2.example.test')]
@@ -131,7 +148,9 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     )
     renderer = Renderer.new
     publisher = Publisher.new
-    aap_client = AapClient.new(execution_record)
+    trace = []
+    aap_client = AapClient.new(execution_record, trace)
+    event_ingestor = EventIngestor.new(trace)
     settler = ResultSettler.new
 
     result = ForemanAnsibleAap::AggregateExecution.new(
@@ -143,6 +162,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
         renderer: renderer,
         publisher: publisher,
         aap_client: aap_client,
+        event_ingestor: event_ingestor,
         result_settler: settler,
       }
     ).call
@@ -177,6 +197,13 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       },
     }, aap_client.launches.first)
     assert_equal [91, 91, 91, 91], aap_client.status_requests
+    assert_equal [91, 91, 91, 91], event_ingestor.jobs
+    assert_equal %i[
+      status_queued events
+      status_waiting events
+      status_running events
+      status_successful events
+    ], trace
     assert_equal [91], aap_client.summary_requests
     assert_equal hosts, settler.successful_hosts
     assert_equal({
@@ -190,51 +217,34 @@ class AggregateExecutionTest < ActiveSupport::TestCase
   end
 
   test 'limits the aggregate launch to the successfully prepared subset' do
-    invocation = Invocation.new(42)
     execution_record = Record.new
     prepared_host = Host.new('node-2.example.test')
-    configuration = configuration()
-    renderer = Renderer.new
-    publisher = Publisher.new
     aap_client = AapClient.new(execution_record)
     settler = ResultSettler.new
 
-    ForemanAnsibleAap::AggregateExecution.new(
-      job_invocation: invocation,
-      execution_record: execution_record,
-      prepared_hosts: [prepared_host],
-      configuration: configuration,
-      dependencies: {
-        renderer: renderer,
-        publisher: publisher,
-        aap_client: aap_client,
-        result_settler: settler,
-      }
-    ).call
+    build_execution(execution_record, [prepared_host], aap_client, settler).call
 
-    assert_equal 1, renderer.invocations.size
-    assert_equal 1, publisher.publications.size
     assert_equal 1, aap_client.launches.size
     assert_equal 'node-2.example.test', aap_client.launches.first.fetch(:limit)
     assert_equal [prepared_host], settler.successful_hosts
   end
 
   test 'does no external or rendering work when no hosts were prepared' do
-    invocation = Invocation.new(42)
     execution_record = Record.new
     renderer = Renderer.new
     publisher = Publisher.new
     aap_client = AapClient.new(execution_record)
 
     result = ForemanAnsibleAap::AggregateExecution.new(
-      job_invocation: invocation,
+      job_invocation: Invocation.new(42),
       execution_record: execution_record,
       prepared_hosts: [],
-      configuration: configuration,
+      configuration: nil,
       dependencies: {
         renderer: renderer,
         publisher: publisher,
         aap_client: aap_client,
+        event_ingestor: EventIngestor.new([]),
         result_settler: ResultSettler.new,
       }
     ).call
@@ -246,36 +256,133 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     assert_nil result.job_id
   end
 
-  test 'a host-context rendering failure is shared by all prepared hosts' do
-    invocation = Invocation.new(42)
+  test 'preserves successful host summaries when the aggregate job fails' do
     execution_record = Record.new
     hosts = [Host.new('node-1.example.test'), Host.new('node-2.example.test')]
+    aap_client = AapClient.new(
+      execution_record,
+      statuses: ['failed'],
+      summaries: [
+        { host_name: 'node-1.example.test', successful: true },
+        { host_name: 'node-2.example.test', successful: false },
+      ]
+    )
+    settler = ResultSettler.new
+    execution = build_execution(execution_record, hosts, aap_client, settler)
+
+    error = assert_raises(ForemanAnsibleAap::AggregateExecution::ExecutionError) { execution.call }
+
+    assert_equal 'AAP job 91 finished with status "failed"', error.message
+    assert_equal [hosts.first], settler.successful_hosts
+    assert_equal [[hosts.last, 'AAP reported a failed result for node-2.example.test']], settler.failed_hosts
+    assert_equal [91], aap_client.summary_requests
+  end
+
+  test 'fails a prepared host missing from all final summaries with an inventory diagnostic' do
+    execution_record = Record.new
+    hosts = [Host.new('node-1.example.test'), Host.new('missing.example.test')]
+    aap_client = AapClient.new(
+      execution_record,
+      summaries: [{ host_name: 'node-1.example.test', successful: true }]
+    )
     settler = ResultSettler.new
 
-    error = assert_raises(ForemanAnsibleAap::PlaybookRenderer::RenderingError) do
-      ForemanAnsibleAap::AggregateExecution.new(
-        job_invocation: invocation,
-        execution_record: execution_record,
-        prepared_hosts: hosts,
-        configuration: configuration,
-        dependencies: {
-          renderer: FailingRenderer.new,
-          publisher: Publisher.new,
-          aap_client: AapClient.new(execution_record),
-          result_settler: settler,
-        }
-      ).call
+    error = assert_raises(ForemanAnsibleAap::AggregateExecution::ExecutionError) do
+      build_execution(execution_record, hosts, aap_client, settler).call
     end
 
-    assert_includes error.message, 'without a current host'
-    assert_equal hosts, settler.failed_hosts.map(&:first)
-    assert(settler.failed_hosts.all? { |(_, failure)| failure == error })
+    assert_equal 'AAP host reconciliation failed for missing.example.test', error.message
+    assert_equal [hosts.first], settler.successful_hosts
+    assert_equal [[
+      hosts.last,
+      'AAP did not report a final host summary for missing.example.test; ' \
+        'the host did not execute or was not present in the synchronized inventory',
+    ]], settler.failed_hosts
+  end
+
+  test 'records an unscoped startup error on the aggregate and fails every prepared host' do
+    execution_record = Record.new
+    hosts = [Host.new('node-1.example.test'), Host.new('node-2.example.test')]
+    aap_client = AapClient.new(execution_record)
+    settler = ResultSettler.new
+    execution = build_execution(
+      execution_record,
+      hosts,
+      aap_client,
+      settler,
+      renderer: FailingRenderer.new
+    )
+
+    error = assert_raises(RuntimeError) { execution.call }
+
+    assert_equal 'playbook syntax error before host execution', error.message
+    assert_empty settler.successful_hosts
+    assert_equal hosts.map { |host| [host, nil] }, settler.failed_hosts
+  end
+
+  test 'host summary failure overrides a successful aggregate status' do
+    execution_record = Record.new
+    host = Host.new('node-1.example.test')
+    aap_client = AapClient.new(
+      execution_record,
+      summaries: [{ host_name: host.name, successful: false }]
+    )
+    settler = ResultSettler.new
+
+    error = assert_raises(ForemanAnsibleAap::AggregateExecution::ExecutionError) do
+      build_execution(execution_record, [host], aap_client, settler).call
+    end
+
+    assert_equal 'AAP host reconciliation failed for node-1.example.test', error.message
+    assert_empty settler.successful_hosts
+    assert_equal [[host, 'AAP reported a failed result for node-1.example.test']], settler.failed_hosts
+  end
+
+  test 'ignores summaries outside the prepared Foreman target set' do
+    execution_record = Record.new
+    host = Host.new('node-1.example.test')
+    aap_client = AapClient.new(
+      execution_record,
+      summaries: [
+        { host_name: host.name, successful: true },
+        { host_name: 'unexpected.example.test', successful: false },
+      ]
+    )
+    settler = ResultSettler.new
+
+    build_execution(execution_record, [host], aap_client, settler).call
+
+    assert_equal [host], settler.successful_hosts
+    assert_empty settler.failed_hosts
+  end
+
+  test 'uses original inventory identity when AAP reports delegated execution' do
+    execution_record = Record.new
+    original_host = Host.new('node-1.example.test')
+    aap_client = AapClient.new(
+      execution_record,
+      summaries: [{
+        host_name: original_host.name,
+        delegated_host_name: 'delegate.example.test',
+        successful: false,
+      }]
+    )
+    settler = ResultSettler.new
+
+    assert_raises(ForemanAnsibleAap::AggregateExecution::ExecutionError) do
+      build_execution(execution_record, [original_host], aap_client, settler).call
+    end
+
+    assert_equal [[
+      original_host,
+      'AAP reported a failed result for node-1.example.test',
+    ]], settler.failed_hosts
   end
 
   private
 
-  def configuration
-    ForemanAnsibleAap::Configuration.new(
+  def build_execution(execution_record, hosts, aap_client, settler, renderer: Renderer.new)
+    configuration = ForemanAnsibleAap::Configuration.new(
       controller_url: 'https://aap.example.test',
       service_token: 'controller-secret',
       ca_bundle: '/etc/pki/aap-ca.pem',
@@ -288,6 +395,20 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       instance_id: 'foreman-prod',
       git_username: 'foreman',
       git_password: 'git-secret'
+    )
+
+    ForemanAnsibleAap::AggregateExecution.new(
+      job_invocation: Invocation.new(42),
+      execution_record: execution_record,
+      prepared_hosts: hosts,
+      configuration: configuration,
+      dependencies: {
+        renderer: renderer,
+        publisher: Publisher.new,
+        aap_client: aap_client,
+        event_ingestor: EventIngestor.new([]),
+        result_settler: settler,
+      }
     )
   end
 end

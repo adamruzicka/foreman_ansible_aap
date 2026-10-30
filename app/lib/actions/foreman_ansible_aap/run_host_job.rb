@@ -10,6 +10,7 @@ module Actions
       # Preparation failures must remain durable even though the action raises to
       # expose the error on this host task.
       middleware.do_not_use Dynflow::Middleware::Common::Transaction
+      include ::Actions::Helpers::WithContinuousOutput
 
       def queue
         ::ForemanRemoteExecution::DYNFLOW_QUEUE
@@ -41,6 +42,24 @@ module Actions
         raise PreparationError, record.preparation_error if record.preparation_state == 'failed'
 
         finish_or_wait(record)
+      end
+
+      def live_output
+        continuous_output.sort!
+      end
+
+      def humanized_output
+        continuous_output.humanize
+      end
+
+      def continuous_output_providers
+        super << self
+      end
+
+      def fill_continuous_output(continuous_output)
+        task.template_invocation.template_invocation_events.order(:timestamp).find_each do |event|
+          continuous_output.add_raw_output(event.as_raw_continuous_output)
+        end
       end
 
       def rescue_strategy

@@ -8,35 +8,35 @@ module ForemanAnsibleAap
 
     def success!(host)
       record = host_executions.fetch(host.name)
-      record.transaction do
-        create_success_event(record)
-        record.update!(result_state: 'successful', result_error: nil)
-      end
+      settle(record, exit_status: '0', result_state: 'successful')
     end
 
-    def fail_all!(hosts, error)
-      message = error.message.presence || error.class.name
-      hosts.each do |host|
-        host_executions.fetch(host.name).update!(
-          result_state: 'failed',
-          result_error: message
-        )
-      end
+    def failure!(host, diagnostic:, error: diagnostic)
+      record = host_executions.fetch(host.name)
+      settle(record, exit_status: '1', result_state: 'failed', diagnostic: diagnostic, error: error)
     end
 
     private
 
     attr_reader :host_executions
 
-    def create_success_event(record)
-      TemplateInvocationEvent.find_or_create_by!(
-        template_invocation: record.template_invocation,
-        external_id: 'aap-host-summary-exit'
-      ) do |event|
-        event.event = '0'
-        event.event_type = 'exit'
-        event.timestamp = Time.zone.now
+    def settle(record, exit_status:, result_state:, diagnostic: nil, error: nil)
+      TemplateInvocationEvent.transaction do
+        invocation = record.template_invocation
+        create_event(invocation, 'aap-host-summary-diagnostic', diagnostic, 'stdout') if diagnostic
+        create_event(invocation, 'aap-host-summary-exit', exit_status, 'exit')
+        record.update!(result_state: result_state, result_error: error)
       end
+    end
+
+    def create_event(invocation, external_id, event, event_type)
+      TemplateInvocationEvent.create!(
+        template_invocation: invocation,
+        external_id: external_id,
+        event: event,
+        event_type: event_type,
+        timestamp: Time.zone.now
+      )
     end
   end
 end

@@ -150,6 +150,7 @@ module ForemanAnsibleAap
         true
       end.returns(id: 1, url: 'https://aap.example.test/jobs/1/')
       AapClient.any_instance.expects(:job_status).once.with(1).returns('successful')
+      AapClient.any_instance.expects(:job_events).once.with(1, after_id: nil).returns([])
       AapClient.any_instance.expects(:host_summaries).once.with(1).returns(
         hosts.map { |host| { host_name: host.name, successful: true } }
       )

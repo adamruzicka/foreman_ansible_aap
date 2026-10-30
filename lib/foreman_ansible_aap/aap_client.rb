@@ -53,10 +53,22 @@ module ForemanAnsibleAap
       transport.get("jobs/#{job_id}/").fetch('status')
     end
 
+    def job_events(job_id, after_id: nil)
+      path = "jobs/#{job_id}/job_events/?order_by=id&page_size=200"
+      path = "#{path}&id__gt=#{after_id}" if after_id
+      events = []
+
+      while path
+        page = transport.get(path)
+        events.concat(page.fetch('results').map { |event| normalize_event(event) })
+        path = page['next']
+      end
+
+      events
+    end
+
     def host_summaries(job_id)
-      transport.get("jobs/#{job_id}/job_host_summaries/?page_size=200")
-               .fetch('results')
-               .map do |summary|
+      paginated_results("jobs/#{job_id}/job_host_summaries/?page_size=200").map do |summary|
         {
           host_name: summary['host_name'] || summary['name'],
           successful: successful_summary?(summary),
@@ -68,6 +80,16 @@ module ForemanAnsibleAap
 
     attr_reader :transport
 
+    def paginated_results(path)
+      results = []
+      while path
+        page = transport.get(path)
+        results.concat(page.fetch('results'))
+        path = page['next']
+      end
+      results
+    end
+
     def expect(resource, field, expected, label)
       actual = resource.fetch(field)
       return if actual == expected
@@ -76,7 +98,17 @@ module ForemanAnsibleAap
     end
 
     def successful_summary?(summary)
-      !summary['failed'] && summary.fetch('failures', 0).zero? && summary.fetch('dark', 0).zero?
+      !summary['failed'] && !summary['unreachable'] &&
+        summary.fetch('failures', 0).zero? && summary.fetch('dark', 0).zero?
+    end
+
+    def normalize_event(event)
+      {
+        id: event.fetch('id'),
+        stdout: event.fetch('stdout', ''),
+        timestamp: event.fetch('created'),
+        host_name: event.fetch('event_data', {})['host'],
+      }
     end
 
     def absolute_url(path)

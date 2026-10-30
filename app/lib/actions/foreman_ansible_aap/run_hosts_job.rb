@@ -161,12 +161,22 @@ module Actions
       end
 
       def execution_dependencies(host_executions)
+        template_invocations = host_executions.map(&:template_invocation)
         {
           renderer: ::ForemanAnsibleAap::PlaybookRenderer.new,
           publisher: ::ForemanAnsibleAap::GitPublisher.new,
           aap_client: aap_client,
+          event_ingestor: event_ingestor(execution_record, template_invocations),
           result_settler: ::ForemanAnsibleAap::ResultSettler.new(host_executions),
         }
+      end
+
+      def event_ingestor(execution_record, template_invocations)
+        ::ForemanAnsibleAap::EventIngestor.new(
+          execution_record: execution_record,
+          template_invocations: template_invocations,
+          aap_client: aap_client
+        )
       end
     end
   end
