@@ -14,7 +14,7 @@ Gem::Specification.new do |s|
   # also update locale/gemspec.rb
   s.description = 'Adds an experimental Ansible Automation Platform execution driver to Foreman Ansible.'
 
-  s.files = Dir['{app,config,db,lib,locale}/**/*'] + ['LICENSE', 'Rakefile', 'README.md']
+  s.files = Dir['{app,config,db,docs,lib,locale,script}/**/*'] + ['LICENSE', 'Rakefile', 'README.md']
   s.test_files = Dir['test/**/*']
 
   s.required_ruby_version = '>= 2.7', '< 4'

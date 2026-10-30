@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Collect read-only evidence for the foreman_ansible_aap live scenario.
+
+Required environment:
+  AAP_CONTROLLER_URL   HTTPS base ending in /api/controller/v2/
+  AAP_SERVICE_TOKEN    dedicated OAuth bearer token
+  AAP_JOB_TEMPLATE_ID  fixed Job Template ID
+  AAP_PROJECT_ID       fixed Project ID
+  AAP_INVENTORY_ID     fixed inventory ID
+  AAP_JOB_ID           playbook job ID to inspect
+
+Optional environment:
+  AAP_CA_BUNDLE        private CA bundle used by curl
+  AAP_EVIDENCE_DIR     output directory (default: ./aap-live-evidence-JOB_ID)
+
+The helper performs GET requests only. It never launches, cancels, or changes
+AAP resources. The output may contain environment-specific job data.
+USAGE
+}
+
+if [[ ${1:-} == '--help' || ${1:-} == '-h' ]]; then
+  usage
+  exit 0
+fi
+
+for command in curl jq; do
+  if ! command -v "$command" >/dev/null 2>&1; then
+    printf 'Required command not found: %s\n' "$command" >&2
+    exit 2
+  fi
+done
+
+required_variables=(
+  AAP_CONTROLLER_URL
+  AAP_SERVICE_TOKEN
+  AAP_JOB_TEMPLATE_ID
+  AAP_PROJECT_ID
+  AAP_INVENTORY_ID
+  AAP_JOB_ID
+)
+for variable in "${required_variables[@]}"; do
+  if [[ -z ${!variable:-} ]]; then
+    printf 'Required environment variable is empty: %s\n' "$variable" >&2
+    exit 2
+  fi
+done
+
+if [[ ! $AAP_CONTROLLER_URL =~ ^https://.*/api/controller/v2/$ ]]; then
+  printf 'AAP_CONTROLLER_URL must be HTTPS and end in /api/controller/v2/\n' >&2
+  exit 2
+fi
+if [[ $AAP_SERVICE_TOKEN == *$'\n'* || $AAP_SERVICE_TOKEN == *$'\r'* ||
+      $AAP_SERVICE_TOKEN == *'"'* || $AAP_SERVICE_TOKEN == *'\\'* ]]; then
+  printf 'AAP_SERVICE_TOKEN contains characters unsafe for curl configuration input\n' >&2
+  exit 2
+fi
+
+aap_origin=${AAP_CONTROLLER_URL%%/api/controller/v2/}
+evidence_dir=${AAP_EVIDENCE_DIR:-"$PWD/aap-live-evidence-$AAP_JOB_ID"}
+mkdir -p "$evidence_dir"
+chmod 700 "$evidence_dir"
+umask 077
+
+curl_arguments=(
+  --fail-with-body
+  --silent
+  --show-error
+  --header 'Accept: application/json'
+)
+if [[ -n ${AAP_CA_BUNDLE:-} ]]; then
+  curl_arguments+=(--cacert "$AAP_CA_BUNDLE")
+fi
+
+absolute_url() {
+  local value=$1
+  if [[ $value == https://* ]]; then
+    if [[ $value != "$aap_origin/"* ]]; then
+      printf 'Refusing pagination URL outside configured AAP origin: %s\n' "$value" >&2
+      return 1
+    fi
+    printf '%s\n' "$value"
+  elif [[ $value == /* ]]; then
+    printf '%s%s\n' "$aap_origin" "$value"
+  else
+    printf '%s%s\n' "$AAP_CONTROLLER_URL" "$value"
+  fi
+}
+
+fetch() {
+  local path=$1
+  local destination=$2
+  printf 'header = "Authorization: Bearer %s"\n' "$AAP_SERVICE_TOKEN" |
+    curl --config - "${curl_arguments[@]}" "$(absolute_url "$path")" >"$destination"
+  jq empty "$destination"
+}
+
+fetch_pages() {
+  local path=$1
+  local destination=$2
+  local page_file
+  local next=$path
+  local page=0
+  local aggregate='[]'
+
+  while [[ -n $next ]]; do
+    page=$((page + 1))
+    page_file="$evidence_dir/.page-$page.json"
+    fetch "$next" "$page_file"
+    aggregate=$(jq -c --argjson aggregate "$aggregate" '$aggregate + .results' "$page_file")
+    next=$(jq -r '.next // empty' "$page_file")
+  done
+
+  jq -n --argjson results "$aggregate" --argjson pages "$page" \
+    '{pages: $pages, count: ($results | length), results: $results}' >"$destination"
+  rm -f "$evidence_dir"/.page-*.json
+}
+
+fetch "job_templates/$AAP_JOB_TEMPLATE_ID/" "$evidence_dir/job-template.json"
+fetch "projects/$AAP_PROJECT_ID/" "$evidence_dir/project.json"
+fetch "inventories/$AAP_INVENTORY_ID/" "$evidence_dir/inventory.json"
+fetch "inventories/$AAP_INVENTORY_ID/inventory_sources/" "$evidence_dir/inventory-sources.json"
+fetch "jobs/$AAP_JOB_ID/" "$evidence_dir/job.json"
+fetch_pages "jobs/$AAP_JOB_ID/job_events/?order_by=id&page_size=200" "$evidence_dir/job-events.json"
+fetch_pages "jobs/$AAP_JOB_ID/job_host_summaries/?page_size=200" "$evidence_dir/job-host-summaries.json"
+
+jq -n \
+  --arg collected_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg controller_url "$AAP_CONTROLLER_URL" \
+  --arg job_template_id "$AAP_JOB_TEMPLATE_ID" \
+  --arg project_id "$AAP_PROJECT_ID" \
+  --arg inventory_id "$AAP_INVENTORY_ID" \
+  --arg job_id "$AAP_JOB_ID" \
+  '{
+    collected_at: $collected_at,
+    controller_url: $controller_url,
+    job_template_id: $job_template_id,
+    project_id: $project_id,
+    inventory_id: $inventory_id,
+    job_id: $job_id
+  }' >"$evidence_dir/manifest.json"
+
+printf 'AAP evidence written to %s\n' "$evidence_dir"
