@@ -4,9 +4,18 @@ module ForemanAnsibleAap
   class AggregateExecution
     class ExecutionError < StandardError; end
 
-    Result = Struct.new(:job_id, :job_url, :commit_sha, :scm_ref, keyword_init: true)
+    Result = Struct.new(
+      :job_id,
+      :job_url,
+      :commit_sha,
+      :scm_ref,
+      :output_incomplete,
+      :output_failure_diagnostic,
+      keyword_init: true
+    )
     ACTIVE_STATUSES = %w[new pending queued waiting running].freeze
     SUCCESSFUL_STATUS = 'successful'
+    MAXIMUM_BACKOFF = 30
 
     def initialize(job_invocation:, execution_record:, prepared_hosts:, configuration:, dependencies:)
       @job_invocation = job_invocation
@@ -18,17 +27,22 @@ module ForemanAnsibleAap
       @aap_client = dependencies.fetch(:aap_client)
       @event_ingestor = dependencies.fetch(:event_ingestor)
       @result_settler = dependencies.fetch(:result_settler)
+      @sleeper = dependencies.fetch(:sleeper, ->(duration) { sleep duration })
     end
 
     def call
       return Result.new if prepared_hosts.empty?
 
-      remote_job, commit_sha = start_remote_job
+      remote_job, commit_sha = persisted_remote_job || start_remote_job
       finish_remote_job(remote_job)
 
       result(remote_job, commit_sha)
+    rescue AapClient::PermanentError => e
+      diagnostic = "AAP integration permanently lost observability: #{e.message}"
+      fail_prepared_hosts(diagnostic: diagnostic, error: diagnostic)
+      raise ExecutionError, diagnostic
     rescue StandardError => e
-      fail_prepared_hosts(e) unless @host_outcomes_settled
+      fail_prepared_hosts(diagnostic: nil, error: e.message) unless @host_outcomes_settled
       raise
     end
 
@@ -53,17 +67,26 @@ module ForemanAnsibleAap
       raise ExecutionError, "AAP host reconciliation failed for #{failed_hosts.join(', ')}" if failed_hosts.any?
     end
 
+    def persisted_remote_job
+      job_id = execution_value(:aap_job_id)
+      return unless job_id
+
+      [{ id: job_id, url: execution_value(:aap_job_url) }, execution_value(:commit_sha)]
+    end
+
     def result(remote_job, commit_sha)
       Result.new(
         job_id: remote_job.fetch(:id),
         job_url: remote_job.fetch(:url),
         commit_sha: commit_sha,
-        scm_ref: scm_ref
+        scm_ref: scm_ref,
+        output_incomplete: execution_value(:output_incomplete) || false,
+        output_failure_diagnostic: execution_value(:output_failure_diagnostic)
       )
     end
 
     attr_reader :job_invocation, :execution_record, :prepared_hosts, :configuration, :renderer,
-      :publisher, :aap_client, :event_ingestor, :result_settler
+      :publisher, :aap_client, :event_ingestor, :result_settler, :sleeper
 
     def preflight!
       aap_client.preflight!(
@@ -116,27 +139,60 @@ module ForemanAnsibleAap
 
     def wait_for_terminal(job_id)
       loop do
-        status = normalize_status(aap_client.job_status(job_id))
-        event_ingestor.ingest(job_id)
+        status = normalize_status(with_polling_retries { aap_client.job_status(job_id) })
+        execution_record.update!(aap_status: status)
+        ingest_output(job_id)
         next if ACTIVE_STATUSES.include?(status)
         return status
       end
     end
 
     def settle_hosts(job_id)
+      summaries = with_polling_retries { aap_client.host_summaries(job_id) }
       failed_hosts = HostOutcomeReconciler.new(
         prepared_hosts: prepared_hosts,
-        summaries: aap_client.host_summaries(job_id),
+        summaries: summaries,
         result_settler: result_settler
       ).call
       @host_outcomes_settled = true
       failed_hosts
     end
 
-    def fail_prepared_hosts(error)
+    def ingest_output(job_id)
+      event_ingestor.ingest(job_id)
+    rescue StandardError => e
+      execution_record.update!(
+        output_incomplete: true,
+        output_failure_diagnostic: e.message
+      )
+    end
+
+    def with_polling_retries
+      result = yield
+      execution_record.update!(polling_failure_count: 0, polling_failure_diagnostic: nil)
+      result
+    rescue AapClient::TransientError => e
+      failure_count = execution_value(:polling_failure_count).to_i + 1
+      execution_record.update!(
+        polling_failure_count: failure_count,
+        polling_failure_diagnostic: e.message
+      )
+      sleeper.call([2**(failure_count - 1), MAXIMUM_BACKOFF].min)
+      retry
+    end
+
+    def fail_prepared_hosts(diagnostic:, error:)
       prepared_hosts.each do |host|
-        result_settler.failure!(host, diagnostic: nil, error: error.message)
+        next if result_settler.respond_to?(:settled?) && result_settler.settled?(host)
+
+        result_settler.failure!(host, diagnostic: diagnostic, error: error)
       end
+    end
+
+    def execution_value(attribute)
+      return execution_record.public_send(attribute) if execution_record.respond_to?(attribute)
+
+      execution_record.attributes[attribute]
     end
 
     def normalize_status(status)
@@ -145,7 +201,8 @@ module ForemanAnsibleAap
     end
 
     def scm_ref
-      @scm_ref ||= "foreman/#{configuration.instance_id}/job-invocation-#{job_invocation.id}"
+      @scm_ref ||= execution_value(:scm_ref) ||
+                   "foreman/#{configuration.instance_id}/job-invocation-#{job_invocation.id}"
     end
   end
 end
