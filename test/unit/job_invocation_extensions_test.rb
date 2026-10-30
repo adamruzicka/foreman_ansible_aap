@@ -66,6 +66,27 @@ class JobInvocationExtensionsTest < ActiveSupport::TestCase
     assert_equal ['SSH user is not supported by the AAP execution driver'], parameter_messages
   end
 
+  test 'raw parameters and invocation models permit the same inherited controls' do
+    template = @invocation.pattern_template_invocations.first.template
+    template.update!(execution_timeout_interval: 30)
+    default_user = Setting[:remote_execution_effective_user]
+    @invocation.pattern_template_invocations.first.effective_user = default_user
+    @invocation.execution_timeout_interval = 30
+
+    model_messages = ForemanAnsibleAap::UnsupportedControls.new(@invocation).messages
+    parameter_messages = ForemanAnsibleAap::UnsupportedControls.for_params(
+      {
+        ssh: { effective_user: default_user },
+        execution_timeout_interval: 30,
+      },
+      aap: true,
+      template: template
+    ).messages
+
+    assert_empty model_messages
+    assert_equal model_messages, parameter_messages
+  end
+
   test 'AAP invocations reject an explicitly selected proxy' do
     @invocation.pattern_template_invocations.first.smart_proxy = FactoryBot.create(:smart_proxy)
 

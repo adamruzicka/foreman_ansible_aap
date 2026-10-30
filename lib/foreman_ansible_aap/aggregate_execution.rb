@@ -142,7 +142,7 @@ module ForemanAnsibleAap
 
     def observe_remote_job
       job_id = execution_value(:aap_job_id)
-      status = normalize_status(with_polling_retries { aap_client.job_status(job_id) })
+      status = poll_status(job_id)
       transition_workflow!(Lifecycle::Workflow::POLLING, aap_status: status)
       ingest_output(job_id)
 
@@ -153,6 +153,13 @@ module ForemanAnsibleAap
       end
 
       finish_terminal_job(job_id, status)
+    end
+
+    def poll_status(job_id)
+      normalize_status(with_polling_retries { aap_client.job_status(job_id) })
+    rescue PollingRetry
+      request_remote_cancellation(job_id) if cancellation_requested?
+      raise
     end
 
     def request_remote_cancellation(job_id)

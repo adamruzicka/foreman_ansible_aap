@@ -28,14 +28,15 @@ module ForemanAnsibleAap
       'cancel the whole Job Invocation instead.'
     )
 
-    def self.for_params(params, aap:)
-      new(nil, aap: aap, params: params)
+    def self.for_params(params, aap:, template: nil)
+      new(nil, aap: aap, params: params, template: template)
     end
 
-    def initialize(job_invocation, aap: nil, params: nil)
+    def initialize(job_invocation, aap: nil, params: nil, template: nil)
       @job_invocation = job_invocation
       @aap = aap
       @params = params
+      @template = template
     end
 
     def messages
@@ -52,7 +53,7 @@ module ForemanAnsibleAap
 
     private
 
-    attr_reader :job_invocation, :aap, :params
+    attr_reader :job_invocation, :aap, :params, :template
 
     def aap_backed?
       return aap unless aap.nil?
@@ -72,10 +73,22 @@ module ForemanAnsibleAap
 
     def parameter_control_messages
       messages = PARAMETER_PATHS.filter_map do |control, path|
-        message(control) if params.dig(*path).present?
+        value = params.dig(*path)
+        message(control) if unsupported_parameter?(control, value)
       end
       messages << message(:provider_inputs) if provider_params?
       messages
+    end
+
+    def unsupported_parameter?(control, value)
+      return false if value.blank?
+      return value != Setting[:remote_execution_effective_user] if control == :effective_user
+      if control == :execution_timeout && template
+        inherited_timeout = template.execution_timeout_interval
+        return inherited_timeout.blank? || value.to_i != inherited_timeout.to_i
+      end
+
+      true
     end
 
     def provider_params?

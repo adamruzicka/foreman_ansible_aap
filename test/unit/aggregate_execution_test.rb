@@ -746,11 +746,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     transient = ForemanAnsibleAap::AapClient::TransientError.new(
       'AAP job 91 temporarily unavailable'
     )
-    aap_client = AapClient.new(
-      execution_record,
-      statuses: [transient, 'running', 'canceled'],
-      summaries: []
-    )
+    aap_client = AapClient.new(execution_record, statuses: [transient, transient], summaries: [])
     settler = ResultSettler.new
     sleeper = Sleeper.new
     execution = build_execution(
@@ -765,9 +761,10 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     assert_empty sleeper.durations
 
     execution_record.update!(cancellation_requested_at: Time.zone.now)
-    active_step = execution.advance
+    second_retry_step = execution.advance
 
-    assert_not active_step.complete?
+    assert_not second_retry_step.complete?
+    assert_equal 2, second_retry_step.retry_after
     assert_equal [91], aap_client.cancellations
   end
 
