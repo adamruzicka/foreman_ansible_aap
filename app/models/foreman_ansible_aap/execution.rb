@@ -10,8 +10,8 @@ module ForemanAnsibleAap
     has_many :host_executions, dependent: :destroy
 
     validates :job_invocation_id, uniqueness: true
-    validates :aggregate_state, inclusion: { in: %w[pending running successful failed skipped cancelled] }
-    validates :workflow_state, inclusion: { in: %w[pending preflighted published launched polling reconciled] }
+    validates :aggregate_state, inclusion: { in: Lifecycle::Aggregate::STATES }
+    validates :workflow_state, inclusion: { in: Lifecycle::Workflow::STATES }
 
     def event_diagnostics
       JSON.parse(self[:event_diagnostics].presence || '[]')

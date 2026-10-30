@@ -2,23 +2,46 @@
 
 module ForemanAnsibleAap
   class UnsupportedControls
-    CONTROL_ATTRIBUTES = {
-      ssh_user: N_('Ssh user'),
-      password: N_('Password'),
-      key_passphrase: N_('Key passphrase'),
-      effective_user_password: N_('Effective user password'),
-      concurrency_level: N_('Concurrency level / proxy batching'),
+    MESSAGES = {
+      ssh_user: N_('SSH user is not supported by the AAP execution driver'),
+      password: N_('SSH password is not supported by the AAP execution driver'),
+      key_passphrase: N_('SSH key passphrase is not supported by the AAP execution driver'),
+      effective_user: N_('Effective user overrides are not supported by the AAP execution driver'),
+      effective_user_password: N_('Effective user password is not supported by the AAP execution driver'),
+      concurrency_level: N_('Concurrency / proxy batching is not supported by the AAP execution driver'),
+      execution_timeout: N_('Execution timeout is owned by AAP and cannot be overridden by Foreman'),
+      smart_proxy: N_('Smart proxy selection is not supported by the AAP execution driver'),
+      provider_inputs: N_('Ansible proxy provider options are not supported by the AAP execution driver'),
     }.freeze
+    PARAMETER_PATHS = {
+      ssh_user: %i[ssh_user],
+      password: %i[password],
+      key_passphrase: %i[key_passphrase],
+      effective_user: %i[ssh effective_user],
+      effective_user_password: %i[ssh effective_user_password],
+      concurrency_level: %i[concurrency_control concurrency_level],
+      execution_timeout: %i[execution_timeout_interval],
+    }.freeze
+    MODEL_ATTRIBUTES = %i[ssh_user password key_passphrase effective_user_password concurrency_level].freeze
+    FILTERED_CANCELLATION_MESSAGE = N_(
+      'Host-filtered cancellation is not supported for a single aggregate AAP job; ' \
+      'cancel the whole Job Invocation instead.'
+    )
 
-    def initialize(job_invocation, aap: nil)
+    def self.for_params(params, aap:)
+      new(nil, aap: aap, params: params)
+    end
+
+    def initialize(job_invocation, aap: nil, params: nil)
       @job_invocation = job_invocation
       @aap = aap
+      @params = params
     end
 
     def messages
       return [] unless aap_backed?
 
-      invocation_control_messages + template_control_messages
+      params ? parameter_control_messages : invocation_control_messages + template_control_messages
     end
 
     def validate!
@@ -29,7 +52,7 @@ module ForemanAnsibleAap
 
     private
 
-    attr_reader :job_invocation, :aap
+    attr_reader :job_invocation, :aap, :params
 
     def aap_backed?
       return aap unless aap.nil?
@@ -39,12 +62,25 @@ module ForemanAnsibleAap
     end
 
     def invocation_control_messages
-      CONTROL_ATTRIBUTES.filter_map do |attribute, label|
+      MODEL_ATTRIBUTES.filter_map do |attribute|
         next unless job_invocation.respond_to?(attribute)
         next if job_invocation.public_send(attribute).blank?
 
-        _('%s is not supported by the AAP execution driver') % _(label)
+        message(attribute)
       end
+    end
+
+    def parameter_control_messages
+      messages = PARAMETER_PATHS.filter_map do |control, path|
+        message(control) if params.dig(*path).present?
+      end
+      messages << message(:provider_inputs) if provider_params?
+      messages
+    end
+
+    def provider_params?
+      provider_params = params[:ansible]
+      provider_params.respond_to?(:values) && provider_params.values.any?(&:present?)
     end
 
     def template_control_messages
@@ -69,20 +105,20 @@ module ForemanAnsibleAap
     def smart_proxy_message(invocation)
       return if invocation.smart_proxy_id.blank?
 
-      _('Smart proxy selection is not supported by the AAP execution driver')
+      message(:smart_proxy)
     end
 
     def effective_user_message(invocation)
       effective_user = invocation.effective_user
       return if effective_user.blank? || effective_user == Setting[:remote_execution_effective_user]
 
-      _('Effective user overrides are not supported by the AAP execution driver')
+      message(:effective_user)
     end
 
     def provider_inputs_message(invocation)
       return if invocation.provider_input_values.none? { |value| value.value.present? }
 
-      _('Ansible proxy provider options are not supported by the AAP execution driver')
+      message(:provider_inputs)
     end
 
     def execution_timeout_message
@@ -92,7 +128,11 @@ module ForemanAnsibleAap
       inherited = template_invocations.filter_map { |invocation| invocation.template.execution_timeout_interval }
       return if timeout.blank? || inherited.include?(timeout)
 
-      _('Execution timeout overrides are not supported because AAP owns the execution deadline')
+      message(:execution_timeout)
+    end
+
+    def message(control)
+      _(MESSAGES.fetch(control))
     end
   end
 end

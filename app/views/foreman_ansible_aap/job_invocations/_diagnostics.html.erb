@@ -5,4 +5,26 @@
   <dt><%= _('AAP job') %></dt>
   <dd><%= link_to(_('AAP job %s') % diagnostics[:job_id], diagnostics[:job_url], target: '_blank', rel: 'noopener noreferrer') %></dd>
 </dl>
+<% if diagnostics[:output_incomplete] %>
+  <div class="alert alert-warning">
+    <strong><%= _('AAP output is incomplete') %></strong>
+    <% if diagnostics[:output_failure_diagnostic].present? %>
+      <p><%= diagnostics[:output_failure_diagnostic] %></p>
+    <% end %>
+  </div>
+<% end %>
+<% if diagnostics[:invocation_diagnostics].any? %>
+  <h3><%= _('Invocation-level AAP output') %></h3>
+  <ul class="list-unstyled">
+    <% diagnostics[:invocation_diagnostics].each do |diagnostic| %>
+      <li>
+        <code><%= diagnostic['timestamp'] %></code>
+        <% if diagnostic['host_name'].present? %>
+          <strong><%= diagnostic['host_name'] %></strong>
+        <% end %>
+        <pre><%= diagnostic['output'] %></pre>
+      </li>
+    <% end %>
+  </ul>
+<% end %>
 <p class="help-block"><%= diagnostics[:limitations] %></p>

@@ -13,7 +13,14 @@ module Api
         @execution = ForemanAnsibleAap::Execution.create!(
           job_invocation: @invocation,
           aap_job_id: 91,
-          aap_job_url: 'https://aap.example.test/api/controller/v2/jobs/91/'
+          aap_job_url: 'https://aap.example.test/api/controller/v2/jobs/91/',
+          event_diagnostics: JSON.generate([{
+            external_id: 'aap-job-91-event-7',
+            output: 'unmapped AAP output',
+            timestamp: '2026-10-30T09:00:00Z',
+          }]),
+          output_incomplete: true,
+          output_failure_diagnostic: 'AAP output page 2 was unavailable'
         )
       end
 
@@ -26,6 +33,13 @@ module Api
           'job_url' => 'https://aap.example.test/api/controller/v2/jobs/91/',
           'limitations' =>
             'Host-filtered cancellation and peripheral task-based integrations are not supported for AAP jobs.',
+          'invocation_diagnostics' => [{
+            'external_id' => 'aap-job-91-event-7',
+            'output' => 'unmapped AAP output',
+            'timestamp' => '2026-10-30T09:00:00Z',
+          }],
+          'output_incomplete' => true,
+          'output_failure_diagnostic' => 'AAP output page 2 was unavailable',
         }, response.parsed_body.fetch('aap'))
       end
 
@@ -37,6 +51,7 @@ module Api
 
         assert_response :not_found
         assert_not_includes response.body, @execution.aap_job_url
+        assert_not_includes response.body, 'unmapped AAP output'
       end
 
       test 'host-filtered AAP cancellation is rejected without cancelling any task' do

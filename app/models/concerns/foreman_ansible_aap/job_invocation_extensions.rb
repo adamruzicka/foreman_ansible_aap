@@ -25,13 +25,18 @@ module ForemanAnsibleAap
       {
         job_id: execution.aap_job_id,
         job_url: execution.aap_job_url,
-        limitations: _(
-          'Host-filtered cancellation and peripheral task-based integrations are not supported for AAP jobs.'
-        ),
+        limitations: aap_limitations,
+        invocation_diagnostics: execution.event_diagnostics,
+        output_incomplete: execution.output_incomplete,
+        output_failure_diagnostic: execution.output_failure_diagnostic,
       }
     end
 
     private
+
+    def aap_limitations
+      _('Host-filtered cancellation and peripheral task-based integrations are not supported for AAP jobs.')
+    end
 
     def reject_unsupported_aap_controls
       ForemanAnsibleAap::UnsupportedControls.new(self).messages.each do |message|

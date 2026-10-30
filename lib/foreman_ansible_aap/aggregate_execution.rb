@@ -4,6 +4,15 @@ module ForemanAnsibleAap
   class AggregateExecution
     class ExecutionError < StandardError; end
 
+    class PollingRetry < StandardError
+      attr_reader :retry_after
+
+      def initialize(message, retry_after:)
+        @retry_after = retry_after
+        super(message)
+      end
+    end
+
     Result = Struct.new(
       :job_id,
       :job_url,
@@ -14,12 +23,9 @@ module ForemanAnsibleAap
       :output_failure_diagnostic,
       keyword_init: true
     )
-    Step = Struct.new(:complete, :result, keyword_init: true) do
+    Step = Struct.new(:complete, :result, :retry_after, keyword_init: true) do
       alias_method :complete?, :complete
     end
-    ACTIVE_STATUSES = %w[new pending queued waiting running].freeze
-    CANCELLED_STATUSES = %w[canceled cancelled].freeze
-    SUCCESSFUL_STATUS = 'successful'
     MAXIMUM_BACKOFF = 30
 
     def initialize(job_invocation:, execution_record:, prepared_hosts:, configuration:, dependencies:)
@@ -36,11 +42,13 @@ module ForemanAnsibleAap
     end
 
     def call
-      return Result.new(state: SUCCESSFUL_STATUS) if prepared_hosts.empty?
+      return Result.new(state: Lifecycle::Result::SUCCESSFUL) if prepared_hosts.empty?
 
       loop do
         step = advance
         return step.result if step.complete?
+
+        sleeper.call(step.retry_after) if step.retry_after
       end
     end
 
@@ -50,27 +58,29 @@ module ForemanAnsibleAap
       return finish_before_launch if cancellation_requested? && execution_value(:aap_job_id).nil?
 
       case execution_value(:workflow_state)
-      when 'pending'
+      when Lifecycle::Workflow::PENDING
         preflight!
-        execution_record.update!(workflow_state: 'preflighted')
+        transition_workflow!(Lifecycle::Workflow::PREFLIGHTED)
         incomplete
-      when 'preflighted'
+      when Lifecycle::Workflow::PREFLIGHTED
         playbook = renderer.render(job_invocation)
         persist_artifact(publish(playbook))
-        execution_record.update!(workflow_state: 'published')
+        transition_workflow!(Lifecycle::Workflow::PUBLISHED)
         incomplete
-      when 'published'
+      when Lifecycle::Workflow::PUBLISHED
         remote_job = launch
         persist_remote_job(remote_job)
-        execution_record.update!(workflow_state: 'launched')
+        transition_workflow!(Lifecycle::Workflow::LAUNCHED)
         incomplete
-      when 'launched', 'polling'
+      when Lifecycle::Workflow::LAUNCHED, Lifecycle::Workflow::POLLING
         observe_remote_job
-      when 'reconciled'
+      when Lifecycle::Workflow::RECONCILED
         complete(completed_state)
       else
         raise ExecutionError, "Unknown aggregate workflow state #{execution_value(:workflow_state).inspect}"
       end
+    rescue PollingRetry => e
+      incomplete(retry_after: e.retry_after)
     rescue AapClient::PermanentError => e
       diagnostic = "AAP integration permanently lost observability: #{e.message}"
       fail_prepared_hosts(diagnostic: diagnostic, error: diagnostic)
@@ -97,8 +107,8 @@ module ForemanAnsibleAap
       )
     end
 
-    def incomplete
-      Step.new(complete: false)
+    def incomplete(retry_after: nil)
+      Step.new(complete: false, retry_after: retry_after)
     end
 
     def complete(state)
@@ -106,30 +116,38 @@ module ForemanAnsibleAap
     end
 
     def completed_state
-      CANCELLED_STATUSES.include?(execution_value(:aap_status)) ? 'cancelled' : SUCCESSFUL_STATUS
+      if Lifecycle::AapStatus::CANCELLED.include?(execution_value(:aap_status))
+        Lifecycle::Result::CANCELLED
+      else
+        Lifecycle::Result::SUCCESSFUL
+      end
     end
 
     def restore_launched_stage
       return if execution_value(:aap_job_id).nil?
-      return if %w[launched polling reconciled].include?(execution_value(:workflow_state))
+      return if Lifecycle::Workflow::LAUNCHED_STATES.include?(execution_value(:workflow_state))
 
-      execution_record.update!(workflow_state: 'launched')
+      transition_workflow!(Lifecycle::Workflow::LAUNCHED)
     end
 
     def finish_before_launch
       prepared_hosts.each { |host| result_settler.cancelled!(host) }
       @host_outcomes_settled = true
-      execution_record.update!(workflow_state: 'reconciled', aap_status: 'cancelled')
-      complete('cancelled')
+      transition_workflow!(
+        Lifecycle::Workflow::RECONCILED,
+        aap_status: Lifecycle::AapStatus::CANCELLED_STATUS
+      )
+      complete(Lifecycle::Result::CANCELLED)
     end
 
     def observe_remote_job
       job_id = execution_value(:aap_job_id)
       status = normalize_status(with_polling_retries { aap_client.job_status(job_id) })
-      execution_record.update!(workflow_state: 'polling', aap_status: status)
+      transition_workflow!(Lifecycle::Workflow::POLLING, aap_status: status)
       ingest_output(job_id)
 
-      if ACTIVE_STATUSES.include?(status)
+      if Lifecycle::AapStatus::ACTIVE.include?(status)
+        clear_polling_failures!
         request_remote_cancellation(job_id) if cancellation_requested?
         return incomplete
       end
@@ -147,16 +165,17 @@ module ForemanAnsibleAap
     end
 
     def finish_terminal_job(job_id, status)
-      cancelled = CANCELLED_STATUSES.include?(status)
+      cancelled = Lifecycle::AapStatus::CANCELLED.include?(status)
       failed_hosts = settle_hosts(job_id, cancelled: cancelled)
-      execution_record.update!(workflow_state: 'reconciled')
-      return complete('cancelled') if cancelled
-      unless status == SUCCESSFUL_STATUS
+      clear_polling_failures!
+      transition_workflow!(Lifecycle::Workflow::RECONCILED)
+      return complete(Lifecycle::Result::CANCELLED) if cancelled
+      unless status == Lifecycle::AapStatus::SUCCESSFUL
         raise ExecutionError, "AAP job #{job_id} finished with status #{status.inspect}"
       end
       raise ExecutionError, "AAP host reconciliation failed for #{failed_hosts.join(', ')}" if failed_hosts.any?
 
-      complete(SUCCESSFUL_STATUS)
+      complete(Lifecycle::Result::SUCCESSFUL)
     end
 
     def preflight!
@@ -234,17 +253,18 @@ module ForemanAnsibleAap
     end
 
     def with_polling_retries
-      result = yield
-      execution_record.update!(polling_failure_count: 0, polling_failure_diagnostic: nil)
-      result
+      yield
     rescue AapClient::TransientError => e
       failure_count = execution_value(:polling_failure_count).to_i + 1
       execution_record.update!(
         polling_failure_count: failure_count,
         polling_failure_diagnostic: e.message
       )
-      sleeper.call([2**(failure_count - 1), MAXIMUM_BACKOFF].min)
-      retry
+      raise PollingRetry.new(e.message, retry_after: [2**(failure_count - 1), MAXIMUM_BACKOFF].min)
+    end
+
+    def clear_polling_failures!
+      execution_record.update!(polling_failure_count: 0, polling_failure_diagnostic: nil)
     end
 
     def fail_prepared_hosts(diagnostic:, error:)
@@ -268,6 +288,10 @@ module ForemanAnsibleAap
 
     def cancellation_requested?
       execution_value(:cancellation_requested_at).present?
+    end
+
+    def transition_workflow!(state, **attributes)
+      Lifecycle.transition!(execution_record, :workflow_state, to: state, **attributes)
     end
 
     def scm_ref

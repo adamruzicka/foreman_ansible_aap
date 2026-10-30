@@ -3,22 +3,6 @@
 module ForemanAnsibleAap
   module Api
     module JobInvocationsControllerExtensions
-      CREATION_CONTROL_PATHS = {
-        %i[ssh_user] => N_('SSH user is not supported by the AAP execution driver'),
-        %i[password] => N_('SSH password is not supported by the AAP execution driver'),
-        %i[key_passphrase] => N_('SSH key passphrase is not supported by the AAP execution driver'),
-        %i[ssh effective_user] => N_('Effective user is not supported by the AAP execution driver'),
-        %i[ssh effective_user_password] => N_('Effective user password is not supported by the AAP execution driver'),
-        %i[concurrency_control concurrency_level] =>
-          N_('Concurrency / proxy batching is not supported by the AAP execution driver'),
-        %i[execution_timeout_interval] =>
-          N_('Execution timeout is owned by AAP and cannot be overridden by Foreman'),
-      }.freeze
-      FILTERED_CANCELLATION_MESSAGE = N_(
-        'Host-filtered cancellation is not supported for a single aggregate AAP job; ' \
-        'cancel the whole Job Invocation instead.'
-      )
-
       def create
         messages = unsupported_aap_creation_controls
         if messages.any?
@@ -32,7 +16,7 @@ module ForemanAnsibleAap
         if params[:search].present? && @job_invocation.aap_backed?
           render json: {
             error: {
-              message: _(FILTERED_CANCELLATION_MESSAGE),
+              message: _(UnsupportedControls::FILTERED_CANCELLATION_MESSAGE),
             },
           }, status: :unprocessable_entity
         else
@@ -46,12 +30,7 @@ module ForemanAnsibleAap
         return [] unless aap_creation?
 
         invocation = params.fetch(:job_invocation, {})
-        messages = CREATION_CONTROL_PATHS.filter_map do |path, message|
-          _(message) if invocation.dig(*path).present?
-        end
-        messages << _('Ansible proxy provider options are not supported by the AAP execution driver') if
-          provider_inputs?(invocation)
-        messages
+        UnsupportedControls.for_params(invocation, aap: true).messages
       end
 
       def aap_creation?
@@ -67,10 +46,6 @@ module ForemanAnsibleAap
         elsif invocation[:feature].present?
           RemoteExecutionFeature.find_by(label: invocation[:feature])&.job_template
         end
-      end
-
-      def provider_inputs?(invocation)
-        invocation[:ansible].respond_to?(:values) && invocation[:ansible].values.any?(&:present?)
       end
     end
   end

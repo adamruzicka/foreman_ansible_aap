@@ -3,6 +3,7 @@
 require 'foreman_ansible'
 require 'foreman_remote_execution'
 require 'foreman_ansible_aap/configuration'
+require 'foreman_ansible_aap/lifecycle'
 require 'foreman_ansible_aap/unsupported_controls'
 require 'foreman_ansible_aap/host_outcome_reconciler'
 require 'foreman_ansible_aap/aggregate_execution'

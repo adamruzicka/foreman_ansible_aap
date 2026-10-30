@@ -8,12 +8,12 @@ module ForemanAnsibleAap
 
     def success!(host)
       record = host_executions.fetch(host.name)
-      settle(record, exit_status: '0', result_state: 'successful')
+      settle(record, exit_status: '0', result_state: Lifecycle::Result::SUCCESSFUL)
     end
 
     def failure!(host, diagnostic:, error: diagnostic)
       record = host_executions.fetch(host.name)
-      settle(record, exit_status: '1', result_state: 'failed', diagnostic: diagnostic, error: error)
+      settle(record, exit_status: '1', result_state: Lifecycle::Result::FAILED, diagnostic: diagnostic, error: error)
     end
 
     def cancelled!(host)
@@ -21,13 +21,13 @@ module ForemanAnsibleAap
       settle(
         record,
         exit_status: '1',
-        result_state: 'cancelled',
+        result_state: Lifecycle::Result::CANCELLED,
         error: 'AAP job cancellation left this host unfinished'
       )
     end
 
     def settled?(host)
-      host_executions.fetch(host.name).result_state != 'pending'
+      host_executions.fetch(host.name).result_state != Lifecycle::Result::PENDING
     end
 
     private
@@ -36,12 +36,12 @@ module ForemanAnsibleAap
 
     def settle(record, exit_status:, result_state:, diagnostic: nil, error: nil)
       record.with_lock do
-        return unless record.result_state == 'pending'
+        return unless record.result_state == Lifecycle::Result::PENDING
 
         invocation = record.template_invocation
         create_event(invocation, 'aap-host-summary-diagnostic', diagnostic, 'stdout') if diagnostic
         create_event(invocation, 'aap-host-summary-exit', exit_status, 'exit')
-        record.update!(result_state: result_state, result_error: error)
+        Lifecycle.transition!(record, :result_state, to: result_state, result_error: error)
       end
     end
 
