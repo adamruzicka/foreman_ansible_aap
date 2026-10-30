@@ -7,14 +7,21 @@ the default.
 ## Installation
 
 Add the plugin alongside compatible `foreman_ansible` and
-`foreman_remote_execution` versions. This initial scaffold establishes the
-driver and aggregate execution seams; it does not yet launch AAP jobs.
+`foreman_remote_execution` versions. Follow the complete
+[experimental setup and limitations guide](docs/experimental-aap.md) before
+enabling the driver.
 
 ## Usage
 
 Set the **Ansible execution driver** setting to **AAP (experimental)** for newly
 created Ansible Job Invocations. Each invocation retains the driver selected
-when it was created.
+when it was created. Smart Proxy execution remains the default, and the AAP
+driver is not production-ready or feature-equivalent to proxy execution.
+
+Validation against a real controller is intentionally separate from normal
+mocked tests. Use the [AAP 2.6 live-integration
+scenario](docs/aap-2.6-live-integration.md) and record observed results without
+assuming the scenario has already passed.
 
 ## Contributing
 
