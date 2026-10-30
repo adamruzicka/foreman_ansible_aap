@@ -55,11 +55,11 @@ module ForemanAnsibleAap
       id = response.fetch('id')
       validate_launch_response!(response, attributes, id)
       { id: id, url: absolute_url(response.fetch('url')) }
-    rescue DefinitiveRequestError => error
-      raise DefinitiveLaunchError, "AAP rejected the launch: #{error.message}"
-    rescue AmbiguousRequestError, KeyError, JSON::ParserError => error
+    rescue DefinitiveRequestError => e
+      raise DefinitiveLaunchError, "AAP rejected the launch: #{e.message}"
+    rescue AmbiguousRequestError, KeyError, JSON::ParserError => e
       raise AmbiguousLaunchError,
-        "AAP launch could not be confirmed or persisted; AAP might still be executing: #{error.message}"
+        "AAP launch could not be confirmed or persisted; AAP might still be executing: #{e.message}"
     end
 
     def cancel(job_id)
@@ -85,9 +85,7 @@ module ForemanAnsibleAap
     end
 
     def host_summaries(job_id)
-      transport.get("jobs/#{job_id}/job_host_summaries/?page_size=200")
-               .fetch('results')
-               .map do |summary|
+      paginated_results("jobs/#{job_id}/job_host_summaries/?page_size=200").map do |summary|
         {
           host_name: summary['host_name'] || summary['name'],
           successful: successful_summary?(summary),
@@ -98,6 +96,16 @@ module ForemanAnsibleAap
     private
 
     attr_reader :transport
+
+    def paginated_results(path)
+      results = []
+      while path
+        page = transport.get(path)
+        results.concat(page.fetch('results'))
+        path = page['next']
+      end
+      results
+    end
 
     def expect(resource, field, expected, label)
       actual = resource.fetch(field)
@@ -120,8 +128,8 @@ module ForemanAnsibleAap
       cancellation_error = begin
         cancel(job_id)
         nil
-      rescue StandardError => error
-        error
+      rescue StandardError => e
+        e
       end
       message = "#{message}; cancellation request failed: #{cancellation_error.message}" if cancellation_error
       raise UnsafeLaunchError, message
@@ -149,7 +157,8 @@ module ForemanAnsibleAap
     end
 
     def successful_summary?(summary)
-      !summary['failed'] && summary.fetch('failures', 0).zero? && summary.fetch('dark', 0).zero?
+      !summary['failed'] && !summary['unreachable'] &&
+        summary.fetch('failures', 0).zero? && summary.fetch('dark', 0).zero?
     end
 
     def normalize_event(event)
@@ -208,10 +217,10 @@ module ForemanAnsibleAap
         end
 
         JSON.parse(response.body)
-      rescue JSON::ParserError => error
-        raise DefinitiveRequestError, "AAP returned invalid JSON: #{error.message}"
-      rescue Net::OpenTimeout, Net::ReadTimeout, EOFError, IOError, SocketError, SystemCallError => error
-        raise AmbiguousRequestError, "AAP connection failed: #{error.message}"
+      rescue JSON::ParserError => e
+        raise DefinitiveRequestError, "AAP returned invalid JSON: #{e.message}"
+      rescue Net::OpenTimeout, Net::ReadTimeout, IOError, SocketError, SystemCallError => e
+        raise AmbiguousRequestError, "AAP connection failed: #{e.message}"
       end
 
       def http_for(uri)

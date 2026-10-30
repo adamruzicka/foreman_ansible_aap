@@ -30,7 +30,11 @@ module ForemanAnsibleAap
         commit_sha = run(environment, 'git', 'rev-parse', 'HEAD', chdir: repository).strip
         expected_tree = run(environment, 'git', 'rev-parse', 'HEAD^{tree}', chdir: repository).strip
         existing_sha = remote_ref_sha(environment, repository, attributes.fetch(:ref))
-        return matching_existing_sha!(environment, repository, attributes.fetch(:ref), existing_sha, expected_tree) if existing_sha
+        if existing_sha
+          return matching_existing_sha!(
+            environment, repository, attributes.fetch(:ref), existing_sha, expected_tree
+          )
+        end
 
         begin
           run(environment, 'git', 'push', 'origin', "HEAD:refs/heads/#{attributes.fetch(:ref)}", chdir: repository)
@@ -57,7 +61,7 @@ module ForemanAnsibleAap
 
     def validate_ref!(ref)
       return if ref.match?(%r{\A[A-Za-z0-9][A-Za-z0-9._/-]*\z}) &&
-        !ref.include?('..') && !ref.end_with?('/') && !ref.include?('//')
+                !ref.include?('..') && !ref.end_with?('/') && !ref.include?('//')
 
       raise PublicationError, "Generated Git ref is invalid: #{ref.inspect}"
     end
@@ -85,9 +89,7 @@ module ForemanAnsibleAap
       relative = Pathname.new(destination).relative_path_from(Pathname.new(repository))
       relative.descend do |component|
         candidate = File.join(repository, component.to_s)
-        if File.symlink?(candidate)
-          raise PublicationError, "Generated playbook path contains a symbolic link: #{path}"
-        end
+        raise PublicationError, "Generated playbook path contains a symbolic link: #{path}" if File.symlink?(candidate)
       end
       FileUtils.mkdir_p(File.dirname(destination))
       File.write(destination, content)

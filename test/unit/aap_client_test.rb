@@ -29,8 +29,20 @@ class AapClientTest < ActiveSupport::TestCase
         { 'results' => [{ 'update_on_launch' => true }] }
       when %r{inventories/8/}
         { 'id' => 8 }
+      when %r{jobs/91/job_host_summaries/.*page=2}
+        {
+          'next' => nil,
+          'results' => [
+            { 'host_name' => 'unreachable.example.test', 'failures' => 0, 'dark' => 0, 'unreachable' => true },
+          ],
+        }
       when %r{jobs/91/job_host_summaries/}
-        { 'results' => [{ 'host_name' => 'node.example.test', 'failures' => 0, 'dark' => 0 }] }
+        {
+          'next' => 'jobs/91/job_host_summaries/?page=2',
+          'results' => [
+            { 'host_name' => 'node.example.test', 'failures' => 0, 'dark' => 0 },
+          ],
+        }
       when %r{jobs/91/}
         { 'status' => 'successful' }
       end
@@ -179,7 +191,10 @@ class AapClientTest < ActiveSupport::TestCase
       },
     ]], transport.posts
     assert_equal 'successful', client.job_status(91)
-    assert_equal [{ host_name: 'node.example.test', successful: true }], client.host_summaries(91)
+    assert_equal [
+      { host_name: 'node.example.test', successful: true },
+      { host_name: 'unreachable.example.test', successful: false },
+    ], client.host_summaries(91)
   end
 
   test 'rejects a controller endpoint without TLS' do

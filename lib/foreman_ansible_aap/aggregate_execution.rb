@@ -21,16 +21,18 @@ module ForemanAnsibleAap
     end
 
     def call
-      remote_job, commit_sha = prepare_and_launch
-      wait_for_success(remote_job.fetch(:id))
-      settle_successful_hosts(remote_job.fetch(:id))
+      remote_job, commit_sha = start_remote_job
+      finish_remote_job(remote_job)
 
       result(remote_job, commit_sha)
+    rescue StandardError => e
+      fail_prepared_hosts(e.message) unless @host_outcomes_settled
+      raise
     end
 
     private
 
-    def prepare_and_launch
+    def start_remote_job
       preflight!
       playbook = renderer.render(job_invocation)
       commit_sha = publish(playbook)
@@ -38,9 +40,15 @@ module ForemanAnsibleAap
       remote_job = launch
       persist_remote_job(remote_job)
       [remote_job, commit_sha]
-    rescue StandardError => error
-      fail_prepared_hosts(error.message)
-      raise
+    end
+
+    def finish_remote_job(remote_job)
+      status = wait_for_terminal(remote_job.fetch(:id))
+      failed_hosts = settle_hosts(remote_job.fetch(:id))
+      unless status == SUCCESSFUL_STATUS
+        raise ExecutionError, "AAP job #{remote_job.fetch(:id)} finished with status #{status.inspect}"
+      end
+      raise ExecutionError, "AAP host reconciliation failed for #{failed_hosts.join(', ')}" if failed_hosts.any?
     end
 
     def result(remote_job, commit_sha)
@@ -102,38 +110,33 @@ module ForemanAnsibleAap
         aap_job_id: remote_job.fetch(:id),
         aap_job_url: remote_job.fetch(:url)
       )
-    rescue StandardError => error
+    rescue StandardError => e
       raise AapClient::AmbiguousLaunchError,
-        "AAP job coordinates could not be persisted; AAP might still be executing: #{error.message}"
+        "AAP job coordinates could not be persisted; AAP might still be executing: #{e.message}"
     end
 
-    def fail_prepared_hosts(diagnostic)
-      prepared_hosts.each { |host| result_settler.failure!(host, diagnostic) }
-    end
-
-    def wait_for_success(job_id)
+    def wait_for_terminal(job_id)
       loop do
         status = normalize_status(aap_client.job_status(job_id))
         event_ingestor.ingest(job_id)
         next if ACTIVE_STATUSES.include?(status)
-        return if status == SUCCESSFUL_STATUS
-
-        raise ExecutionError, "AAP job #{job_id} finished with status #{status.inspect}"
+        return status
       end
     end
 
-    def settle_successful_hosts(job_id)
-      summaries = aap_client.host_summaries(job_id).index_by do |summary|
-        summary.fetch(:host_name)
-      end
+    def settle_hosts(job_id)
+      failed_hosts = HostOutcomeReconciler.new(
+        prepared_hosts: prepared_hosts,
+        summaries: aap_client.host_summaries(job_id),
+        result_settler: result_settler
+      ).call
+      @host_outcomes_settled = true
+      failed_hosts
+    end
 
+    def fail_prepared_hosts(diagnostic)
       prepared_hosts.each do |host|
-        summary = summaries[host.name]
-        unless summary && summary[:successful]
-          raise ExecutionError, "AAP did not report a successful result for #{host.name}"
-        end
-
-        result_settler.success!(host)
+        result_settler.failure!(host, diagnostic: diagnostic)
       end
     end
 
