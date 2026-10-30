@@ -6,4 +6,5 @@ require 'dynflow/testing'
 
 # Add plugin to FactoryBot's paths
 FactoryBot.definition_file_paths << "#{ForemanRemoteExecution::Engine.root}/test/factories"
+FactoryBot.definition_file_paths << "#{ForemanTasks::Engine.root}/test/factories"
 FactoryBot.reload
