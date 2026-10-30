@@ -88,14 +88,26 @@ class AggregateExecutionTest < ActiveSupport::TestCase
   end
 
   class ResultSettler
-    attr_reader :successful_hosts
+    attr_reader :successful_hosts, :failed_hosts
 
     def initialize
       @successful_hosts = []
+      @failed_hosts = []
     end
 
     def success!(host)
       @successful_hosts << host
+    end
+
+    def fail_all!(hosts, error)
+      @failed_hosts.concat(hosts.map { |host| [host, error] })
+    end
+  end
+
+  class FailingRenderer
+    def render(_invocation)
+      raise ForemanAnsibleAap::PlaybookRenderer::RenderingError,
+        'Host-specific template data is unavailable without a current host'
     end
   end
 
@@ -175,5 +187,107 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       aap_job_url: 'https://aap.example.test/execution/jobs/playbook/91/',
     }, execution_record.attributes)
     assert_equal 91, result.job_id
+  end
+
+  test 'limits the aggregate launch to the successfully prepared subset' do
+    invocation = Invocation.new(42)
+    execution_record = Record.new
+    prepared_host = Host.new('node-2.example.test')
+    configuration = configuration()
+    renderer = Renderer.new
+    publisher = Publisher.new
+    aap_client = AapClient.new(execution_record)
+    settler = ResultSettler.new
+
+    ForemanAnsibleAap::AggregateExecution.new(
+      job_invocation: invocation,
+      execution_record: execution_record,
+      prepared_hosts: [prepared_host],
+      configuration: configuration,
+      dependencies: {
+        renderer: renderer,
+        publisher: publisher,
+        aap_client: aap_client,
+        result_settler: settler,
+      }
+    ).call
+
+    assert_equal 1, renderer.invocations.size
+    assert_equal 1, publisher.publications.size
+    assert_equal 1, aap_client.launches.size
+    assert_equal 'node-2.example.test', aap_client.launches.first.fetch(:limit)
+    assert_equal [prepared_host], settler.successful_hosts
+  end
+
+  test 'does no external or rendering work when no hosts were prepared' do
+    invocation = Invocation.new(42)
+    execution_record = Record.new
+    renderer = Renderer.new
+    publisher = Publisher.new
+    aap_client = AapClient.new(execution_record)
+
+    result = ForemanAnsibleAap::AggregateExecution.new(
+      job_invocation: invocation,
+      execution_record: execution_record,
+      prepared_hosts: [],
+      configuration: configuration,
+      dependencies: {
+        renderer: renderer,
+        publisher: publisher,
+        aap_client: aap_client,
+        result_settler: ResultSettler.new,
+      }
+    ).call
+
+    assert_empty renderer.invocations
+    assert_empty publisher.publications
+    assert_empty aap_client.preflights
+    assert_empty aap_client.launches
+    assert_nil result.job_id
+  end
+
+  test 'a host-context rendering failure is shared by all prepared hosts' do
+    invocation = Invocation.new(42)
+    execution_record = Record.new
+    hosts = [Host.new('node-1.example.test'), Host.new('node-2.example.test')]
+    settler = ResultSettler.new
+
+    error = assert_raises(ForemanAnsibleAap::PlaybookRenderer::RenderingError) do
+      ForemanAnsibleAap::AggregateExecution.new(
+        job_invocation: invocation,
+        execution_record: execution_record,
+        prepared_hosts: hosts,
+        configuration: configuration,
+        dependencies: {
+          renderer: FailingRenderer.new,
+          publisher: Publisher.new,
+          aap_client: AapClient.new(execution_record),
+          result_settler: settler,
+        }
+      ).call
+    end
+
+    assert_includes error.message, 'without a current host'
+    assert_equal hosts, settler.failed_hosts.map(&:first)
+    assert(settler.failed_hosts.all? { |(_, failure)| failure == error })
+  end
+
+  private
+
+  def configuration
+    ForemanAnsibleAap::Configuration.new(
+      controller_url: 'https://aap.example.test',
+      service_token: 'controller-secret',
+      ca_bundle: '/etc/pki/aap-ca.pem',
+      job_template_id: 7,
+      inventory_id: 8,
+      project_id: 9,
+      repository_url: 'https://git.example.test/generated.git',
+      base_ref: 'main',
+      playbook_path: 'generated/foreman.yml',
+      instance_id: 'foreman-prod',
+      git_username: 'foreman',
+      git_password: 'git-secret'
+    )
   end
 end

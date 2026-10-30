@@ -20,6 +20,17 @@ module ForemanAnsibleAap
     end
 
     def call
+      return Result.new if prepared_hosts.empty?
+
+      execute
+    rescue StandardError => e
+      result_settler.fail_all!(prepared_hosts, e)
+      raise
+    end
+
+    private
+
+    def execute
       preflight!
       playbook = renderer.render(job_invocation)
       commit_sha = publish(playbook)
@@ -31,8 +42,6 @@ module ForemanAnsibleAap
 
       result(remote_job, commit_sha)
     end
-
-    private
 
     def result(remote_job, commit_sha)
       Result.new(
