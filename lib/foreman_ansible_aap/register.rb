@@ -5,6 +5,17 @@ Foreman::Plugin.register :foreman_ansible_aap do
   requires_foreman '>= 5.1'
   register_gettext
 
+  extend_rabl_template 'api/v2/job_invocations/main',
+    'foreman_ansible_aap/api/v2/job_invocations/aap'
+
+  extend_page 'job_invocations/show' do |context|
+    context.add_pagelet :main_tabs,
+      id: :aap_diagnostics,
+      name: N_('AAP diagnostics'),
+      partial: 'foreman_ansible_aap/job_invocations/diagnostics',
+      onlyif: ->(invocation, _) { invocation.aap_diagnostics.present? }
+  end
+
   settings do
     category :ansible, N_('Ansible') do
       setting 'aap_controller_url', type: :string, default: '',
