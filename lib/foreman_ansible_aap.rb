@@ -3,6 +3,7 @@
 require 'foreman_ansible'
 require 'foreman_remote_execution'
 require 'foreman_ansible_aap/configuration'
+require 'foreman_ansible_aap/host_outcome_reconciler'
 require 'foreman_ansible_aap/aggregate_execution'
 require 'foreman_ansible_aap/aap_client'
 require 'foreman_ansible_aap/event_ingestor'

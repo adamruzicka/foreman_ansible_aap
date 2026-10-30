@@ -68,9 +68,7 @@ module ForemanAnsibleAap
     end
 
     def host_summaries(job_id)
-      transport.get("jobs/#{job_id}/job_host_summaries/?page_size=200")
-               .fetch('results')
-               .map do |summary|
+      paginated_results("jobs/#{job_id}/job_host_summaries/?page_size=200").map do |summary|
         {
           host_name: summary['host_name'] || summary['name'],
           successful: successful_summary?(summary),
@@ -82,6 +80,16 @@ module ForemanAnsibleAap
 
     attr_reader :transport
 
+    def paginated_results(path)
+      results = []
+      while path
+        page = transport.get(path)
+        results.concat(page.fetch('results'))
+        path = page['next']
+      end
+      results
+    end
+
     def expect(resource, field, expected, label)
       actual = resource.fetch(field)
       return if actual == expected
@@ -90,7 +98,8 @@ module ForemanAnsibleAap
     end
 
     def successful_summary?(summary)
-      !summary['failed'] && summary.fetch('failures', 0).zero? && summary.fetch('dark', 0).zero?
+      !summary['failed'] && !summary['unreachable'] &&
+        summary.fetch('failures', 0).zero? && summary.fetch('dark', 0).zero?
     end
 
     def normalize_event(event)
