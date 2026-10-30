@@ -7,10 +7,11 @@ module ForemanAnsibleAap
         'the host did not execute or was not present in the synchronized inventory'
     end
 
-    def initialize(prepared_hosts:, summaries:, result_settler:)
+    def initialize(prepared_hosts:, summaries:, result_settler:, cancelled: false)
       @prepared_hosts = prepared_hosts
       @summaries = summaries.index_by { |summary| summary.fetch(:host_name) }
       @result_settler = result_settler
+      @cancelled = cancelled
     end
 
     def call
@@ -19,7 +20,7 @@ module ForemanAnsibleAap
 
     private
 
-    attr_reader :prepared_hosts, :summaries, :result_settler
+    attr_reader :prepared_hosts, :summaries, :result_settler, :cancelled
 
     def settle(host)
       summary = summaries[host.name]
@@ -34,6 +35,11 @@ module ForemanAnsibleAap
     end
 
     def missing_summary(host)
+      if cancelled
+        result_settler.cancelled!(host)
+        return
+      end
+
       result_settler.failure!(host, diagnostic: MISSING_SUMMARY_DIAGNOSTIC.call(host))
       host.name
     end

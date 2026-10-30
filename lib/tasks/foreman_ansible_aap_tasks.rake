@@ -10,6 +10,7 @@ namespace :test do
     task.verbose = false
     task.warning = false
   end
+  Rake::Task[:foreman_ansible_aap].enhance ['db:test:prepare', 'db:migrate']
 end
 
 Rake::Task[:test].enhance ['test:foreman_ansible_aap']

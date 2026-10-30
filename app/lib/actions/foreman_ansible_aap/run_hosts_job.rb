@@ -67,6 +67,26 @@ module Actions
         )
       end
 
+      # AAP cancellation belongs to the aggregate execution. Do not forward
+      # Dynflow cancellation to the lightweight host tasks: they wait for the
+      # authoritative aggregate outcome instead.
+      def cancel!(_force = false)
+        execution_record.update!(cancellation_requested_at: Time.zone.now) unless execution_record.cancellation_requested_at
+        output[:cancelled_timestamp] ||= Time.now.utc.iso8601
+      end
+
+      def abort!
+        cancel!
+      end
+
+      def check_for_errors!
+        if execution_record.aggregate_state == 'cancelled'
+          error! ::ForemanTasks::Task::TaskCancelledException.new(_('Task cancelled'))
+        else
+          super
+        end
+      end
+
       def total_count
         hosts.count
       end
@@ -95,14 +115,16 @@ module Actions
 
       def coordinate_aggregate
         prepared_records = prepared_host_records
-        return skip_aggregate if prepared_records.empty?
+        if prepared_records.empty?
+          skip_aggregate
+          complete_aggregate
+          return
+        end
 
         execute_aggregate(prepared_records)
       rescue StandardError => e
         record_aggregate_failure(e)
-      ensure
-        output[:aggregate_complete] = true
-        wake_host_tasks
+        complete_aggregate
       end
 
       def prepared_host_records
@@ -119,16 +141,27 @@ module Actions
       end
 
       def execute_aggregate(prepared_records)
-        execution_record.update!(aggregate_state: 'running', aggregate_error: nil)
-        result = ::ForemanAnsibleAap::AggregateExecution.new(
+        if execution_record.aggregate_state == 'pending'
+          execution_record.update!(aggregate_state: 'running', aggregate_error: nil)
+        end
+        step = ::ForemanAnsibleAap::AggregateExecution.new(
           job_invocation: job_invocation,
           execution_record: execution_record,
           prepared_hosts: prepared_records.map(&:host),
           configuration: configuration,
           dependencies: execution_dependencies(prepared_records)
-        ).call
-        execution_record.update!(aggregate_state: 'successful', aggregate_error: nil)
-        record_output(result)
+        ).advance
+        return unless step.complete?
+
+        aggregate_state = step.result.state == 'cancelled' ? 'cancelled' : 'successful'
+        execution_record.update!(aggregate_state: aggregate_state, aggregate_error: nil)
+        record_output(step.result)
+        complete_aggregate
+      end
+
+      def complete_aggregate
+        output[:aggregate_complete] = true
+        wake_host_tasks
       end
 
       def wake_host_tasks

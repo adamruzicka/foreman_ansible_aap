@@ -92,6 +92,11 @@ module ForemanAnsibleAap
       end
     end
 
+    def cancel!(job_id)
+      cancel(job_id)
+      true
+    end
+
     def job_events(job_id, after_id: nil)
       observe("output for AAP job #{job_id}") do
         path = "jobs/#{job_id}/job_events/?order_by=id&page_size=200"
@@ -285,7 +290,7 @@ module ForemanAnsibleAap
         response = http_for(uri).request(request)
         raise HttpError, response.code unless response.is_a?(Net::HTTPSuccess)
 
-        JSON.parse(response.body)
+        response.body.blank? ? {} : JSON.parse(response.body)
       rescue JSON::ParserError => e
         raise DefinitiveRequestError, "AAP returned invalid JSON: #{e.message}"
       rescue Net::OpenTimeout, Net::ReadTimeout, IOError, SocketError, SystemCallError => e

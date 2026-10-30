@@ -11,7 +11,7 @@ module ForemanAnsibleAap
     validates :host_id, uniqueness: { scope: :execution_id }
     validates :template_invocation_id, uniqueness: true
     validates :preparation_state, inclusion: { in: %w[pending prepared failed] }
-    validates :result_state, inclusion: { in: %w[pending successful failed] }
+    validates :result_state, inclusion: { in: %w[pending successful failed cancelled] }
 
     scope :prepared, -> { where(preparation_state: 'prepared') }
   end

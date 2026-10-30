@@ -9,11 +9,16 @@ module ForemanAnsibleAap
       :job_url,
       :commit_sha,
       :scm_ref,
+      :state,
       :output_incomplete,
       :output_failure_diagnostic,
       keyword_init: true
     )
+    Step = Struct.new(:complete, :result, keyword_init: true) do
+      alias_method :complete?, :complete
+    end
     ACTIVE_STATUSES = %w[new pending queued waiting running].freeze
+    CANCELLED_STATUSES = %w[canceled cancelled].freeze
     SUCCESSFUL_STATUS = 'successful'
     MAXIMUM_BACKOFF = 30
 
@@ -31,12 +36,41 @@ module ForemanAnsibleAap
     end
 
     def call
-      return Result.new if prepared_hosts.empty?
+      return Result.new(state: SUCCESSFUL_STATUS) if prepared_hosts.empty?
 
-      remote_job, commit_sha = persisted_remote_job || start_remote_job
-      finish_remote_job(remote_job)
+      loop do
+        step = advance
+        return step.result if step.complete?
+      end
+    end
 
-      result(remote_job, commit_sha)
+    def advance
+      execution_record.reload
+      restore_launched_stage
+      return finish_before_launch if cancellation_requested? && execution_value(:aap_job_id).nil?
+
+      case execution_value(:workflow_state)
+      when 'pending'
+        preflight!
+        execution_record.update!(workflow_state: 'preflighted')
+        incomplete
+      when 'preflighted'
+        playbook = renderer.render(job_invocation)
+        persist_artifact(publish(playbook))
+        execution_record.update!(workflow_state: 'published')
+        incomplete
+      when 'published'
+        remote_job = launch
+        persist_remote_job(remote_job)
+        execution_record.update!(workflow_state: 'launched')
+        incomplete
+      when 'launched', 'polling'
+        observe_remote_job
+      when 'reconciled'
+        complete(completed_state)
+      else
+        raise ExecutionError, "Unknown aggregate workflow state #{execution_value(:workflow_state).inspect}"
+      end
     rescue AapClient::PermanentError => e
       diagnostic = "AAP integration permanently lost observability: #{e.message}"
       fail_prepared_hosts(diagnostic: diagnostic, error: diagnostic)
@@ -48,45 +82,82 @@ module ForemanAnsibleAap
 
     private
 
-    def start_remote_job
-      preflight!
-      playbook = renderer.render(job_invocation)
-      commit_sha = publish(playbook)
-      persist_artifact(commit_sha)
-      remote_job = launch
-      persist_remote_job(remote_job)
-      [remote_job, commit_sha]
-    end
+    attr_reader :job_invocation, :execution_record, :prepared_hosts, :configuration, :renderer,
+      :publisher, :aap_client, :event_ingestor, :result_settler, :sleeper
 
-    def finish_remote_job(remote_job)
-      status = wait_for_terminal(remote_job.fetch(:id))
-      failed_hosts = settle_hosts(remote_job.fetch(:id))
-      unless status == SUCCESSFUL_STATUS
-        raise ExecutionError, "AAP job #{remote_job.fetch(:id)} finished with status #{status.inspect}"
-      end
-      raise ExecutionError, "AAP host reconciliation failed for #{failed_hosts.join(', ')}" if failed_hosts.any?
-    end
-
-    def persisted_remote_job
-      job_id = execution_value(:aap_job_id)
-      return unless job_id
-
-      [{ id: job_id, url: execution_value(:aap_job_url) }, execution_value(:commit_sha)]
-    end
-
-    def result(remote_job, commit_sha)
+    def completed_result(state)
       Result.new(
-        job_id: remote_job.fetch(:id),
-        job_url: remote_job.fetch(:url),
-        commit_sha: commit_sha,
-        scm_ref: scm_ref,
+        job_id: execution_value(:aap_job_id),
+        job_url: execution_value(:aap_job_url),
+        commit_sha: execution_value(:commit_sha),
+        scm_ref: execution_value(:scm_ref),
+        state: state,
         output_incomplete: execution_value(:output_incomplete) || false,
         output_failure_diagnostic: execution_value(:output_failure_diagnostic)
       )
     end
 
-    attr_reader :job_invocation, :execution_record, :prepared_hosts, :configuration, :renderer,
-      :publisher, :aap_client, :event_ingestor, :result_settler, :sleeper
+    def incomplete
+      Step.new(complete: false)
+    end
+
+    def complete(state)
+      Step.new(complete: true, result: completed_result(state))
+    end
+
+    def completed_state
+      CANCELLED_STATUSES.include?(execution_value(:aap_status)) ? 'cancelled' : SUCCESSFUL_STATUS
+    end
+
+    def restore_launched_stage
+      return if execution_value(:aap_job_id).nil?
+      return if %w[launched polling reconciled].include?(execution_value(:workflow_state))
+
+      execution_record.update!(workflow_state: 'launched')
+    end
+
+    def finish_before_launch
+      prepared_hosts.each { |host| result_settler.cancelled!(host) }
+      @host_outcomes_settled = true
+      execution_record.update!(workflow_state: 'reconciled', aap_status: 'cancelled')
+      complete('cancelled')
+    end
+
+    def observe_remote_job
+      job_id = execution_value(:aap_job_id)
+      status = normalize_status(with_polling_retries { aap_client.job_status(job_id) })
+      execution_record.update!(workflow_state: 'polling', aap_status: status)
+      ingest_output(job_id)
+
+      if ACTIVE_STATUSES.include?(status)
+        request_remote_cancellation(job_id) if cancellation_requested?
+        return incomplete
+      end
+
+      finish_terminal_job(job_id, status)
+    end
+
+    def request_remote_cancellation(job_id)
+      return if execution_value(:cancellation_sent_at)
+
+      # Record intent before crossing the HTTP boundary. A crash can therefore
+      # lose a cancellation request, but can never duplicate one.
+      execution_record.update!(cancellation_sent_at: Time.zone.now)
+      aap_client.cancel!(job_id)
+    end
+
+    def finish_terminal_job(job_id, status)
+      cancelled = CANCELLED_STATUSES.include?(status)
+      failed_hosts = settle_hosts(job_id, cancelled: cancelled)
+      execution_record.update!(workflow_state: 'reconciled')
+      return complete('cancelled') if cancelled
+      unless status == SUCCESSFUL_STATUS
+        raise ExecutionError, "AAP job #{job_id} finished with status #{status.inspect}"
+      end
+      raise ExecutionError, "AAP host reconciliation failed for #{failed_hosts.join(', ')}" if failed_hosts.any?
+
+      complete(SUCCESSFUL_STATUS)
+    end
 
     def preflight!
       aap_client.preflight!(
@@ -140,22 +211,13 @@ module ForemanAnsibleAap
         "AAP job coordinates could not be persisted; AAP might still be executing: #{e.message}"
     end
 
-    def wait_for_terminal(job_id)
-      loop do
-        status = normalize_status(with_polling_retries { aap_client.job_status(job_id) })
-        execution_record.update!(aap_status: status)
-        ingest_output(job_id)
-        next if ACTIVE_STATUSES.include?(status)
-        return status
-      end
-    end
-
-    def settle_hosts(job_id)
+    def settle_hosts(job_id, cancelled: false)
       summaries = with_polling_retries { aap_client.host_summaries(job_id) }
       failed_hosts = HostOutcomeReconciler.new(
         prepared_hosts: prepared_hosts,
         summaries: summaries,
-        result_settler: result_settler
+        result_settler: result_settler,
+        cancelled: cancelled
       ).call
       @host_outcomes_settled = true
       failed_hosts
@@ -201,6 +263,10 @@ module ForemanAnsibleAap
     def normalize_status(status)
       status = status.fetch(:status) if status.respond_to?(:fetch) && status.is_a?(Hash)
       status.to_s
+    end
+
+    def cancellation_requested?
+      execution_value(:cancellation_requested_at).present?
     end
 
     def scm_ref

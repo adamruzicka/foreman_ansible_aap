@@ -261,6 +261,36 @@ class AapClientTest < ActiveSupport::TestCase
     ], transport.gets
   end
 
+  test 'cancels one persisted AAP job through its job endpoint' do
+    transport = Transport.new
+    client = ForemanAnsibleAap::AapClient.new(
+      controller_url: 'https://unused.example.test', token: 'secret', ca_bundle: nil, transport: transport
+    )
+
+    assert client.cancel!(91)
+
+    assert_equal [['jobs/91/cancel/', {}]], transport.posts
+  end
+
+  test 'accepts an empty successful cancellation response' do
+    response_class = Class.new(Net::HTTPAccepted) do
+      def body
+        ''
+      end
+    end
+    response = response_class.new('1.1', '202', 'Accepted')
+    http = mock('HTTPS connection')
+    http.expects(:use_ssl=).with(true)
+    http.expects(:verify_mode=).with(OpenSSL::SSL::VERIFY_PEER)
+    http.expects(:request).returns(response)
+    Net::HTTP.expects(:new).with('aap.example.test', 443).returns(http)
+    transport = ForemanAnsibleAap::AapClient::HttpsTransport.new(
+      controller_url: 'https://aap.example.test', token: 'secret', ca_bundle: nil
+    )
+
+    assert_equal({}, transport.post('jobs/91/cancel/', {}))
+  end
+
   test 'classifies network failures, rate limiting, and server errors as transient observations' do
     failures = [
       Timeout::Error.new('timed out'),

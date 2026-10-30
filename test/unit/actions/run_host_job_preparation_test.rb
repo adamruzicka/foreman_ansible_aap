@@ -55,6 +55,18 @@ module ForemanAnsibleAap
       assert_equal 'prepared', host_execution.reload.preparation_state
     end
 
+    test 'an unfinished host receives a cancellation outcome without becoming independently cancellable' do
+      host_execution = build_host_execution(
+        preparation_state: 'prepared',
+        result_state: 'cancelled',
+        result_error: 'AAP job cancellation left this host unfinished'
+      )
+      action = action_for(host_execution)
+
+      assert_raises(ForemanTasks::Task::TaskCancelledException) { run_action(action) }
+      refute Actions::ForemanAnsibleAap::RunHostJob < Dynflow::Action::Cancellable
+    end
+
     private
 
     def action_for(host_execution)
