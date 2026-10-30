@@ -3,6 +3,8 @@
 module Actions
   module ForemanAnsibleAap
     class RunHostJob < Actions::EntryAction
+      include ::Actions::Helpers::WithContinuousOutput
+
       def queue
         ::ForemanRemoteExecution::DYNFLOW_QUEUE
       end
@@ -27,6 +29,24 @@ module Actions
       end
 
       def run
+      end
+
+      def live_output
+        continuous_output.sort!
+      end
+
+      def humanized_output
+        continuous_output.humanize
+      end
+
+      def continuous_output_providers
+        super << self
+      end
+
+      def fill_continuous_output(continuous_output)
+        task.template_invocation.template_invocation_events.order(:timestamp).find_each do |event|
+          continuous_output.add_raw_output(event.as_raw_continuous_output)
+        end
       end
 
       def rescue_strategy

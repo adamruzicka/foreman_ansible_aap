@@ -69,5 +69,22 @@ module ForemanAnsibleAap
 
       host_action.plan(job_invocation, host, template_invocation)
     end
+
+    test 'exposes persisted AAP output through the host task live output interface' do
+      raw_output = {
+        'output_type' => 'stdout',
+        'output' => 'live from AAP',
+        'timestamp' => Time.zone.parse('2026-10-30T09:00:00Z').to_f,
+      }
+      relation = mock('template invocation events')
+      relation.expects(:order).with(:timestamp).returns(relation)
+      relation.expects(:find_each).yields(stub(as_raw_continuous_output: raw_output))
+      host_action = Actions::ForemanAnsibleAap::RunHostJob.allocate
+      host_action.stubs(:task).returns(
+        stub(template_invocation: stub(template_invocation_events: relation))
+      )
+
+      assert_equal [raw_output], host_action.live_output
+    end
   end
 end
