@@ -24,6 +24,29 @@ module Actions
         end
       end
 
+      def finalize
+        invocation = job_invocation
+        template_invocations = prepared_template_invocations(invocation)
+        execution = ::ForemanAnsibleAap::AggregateExecution.new(
+          job_invocation: invocation,
+          execution_record: ::ForemanAnsibleAap::Execution.find_or_create_by!(job_invocation: invocation),
+          prepared_hosts: template_invocations.map(&:host),
+          configuration: configuration,
+          dependencies: execution_dependencies(template_invocations)
+        )
+        result = execution.call
+        record_output(result)
+      end
+
+      def record_output(result)
+        output.update(
+          aap_job_id: result.job_id,
+          aap_job_url: result.job_url,
+          aap_commit_sha: result.commit_sha,
+          aap_scm_ref: result.scm_ref
+        )
+      end
+
       def total_count
         hosts.count
       end
@@ -46,6 +69,36 @@ module Actions
 
       def rescue_strategy
         ::Dynflow::Action::Rescue::Skip
+      end
+
+      private
+
+      def prepared_template_invocations(invocation)
+        invocation.template_invocations
+                  .where.not(run_host_job_task_id: nil)
+                  .includes(:host)
+                  .to_a
+      end
+
+      def configuration
+        @configuration ||= ::ForemanAnsibleAap::Configuration.from_settings
+      end
+
+      def aap_client
+        ::ForemanAnsibleAap::AapClient.new(
+          controller_url: configuration.controller_url,
+          token: configuration.service_token,
+          ca_bundle: configuration.ca_bundle
+        )
+      end
+
+      def execution_dependencies(template_invocations)
+        {
+          renderer: ::ForemanAnsibleAap::PlaybookRenderer.new,
+          publisher: ::ForemanAnsibleAap::GitPublisher.new,
+          aap_client: aap_client,
+          result_settler: ::ForemanAnsibleAap::ResultSettler.new(template_invocations),
+        }
       end
     end
   end

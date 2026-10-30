@@ -21,10 +21,7 @@ module ForemanAnsibleAap
 
     initializer 'foreman_ansible_aap.register_plugin', before: :finisher_hook do |app|
       app.reloader.to_prepare do
-        Foreman::Plugin.register :foreman_ansible_aap do
-          requires_foreman '>= 5.1'
-          register_gettext
-        end
+        require 'foreman_ansible_aap/register'
       end
     end
   end
