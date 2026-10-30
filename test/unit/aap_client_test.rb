@@ -89,6 +89,18 @@ class AapClientTest < ActiveSupport::TestCase
     end
   end
 
+  class FailingObservationTransport < Transport
+    def initialize(failure)
+      super()
+      @failure = failure
+    end
+
+    def get(path)
+      gets << path
+      raise @failure
+    end
+  end
+
   class IgnoredLaunchTransport < Transport
     def post(path, body)
       posts << [path, body]
@@ -249,6 +261,68 @@ class AapClientTest < ActiveSupport::TestCase
     ], transport.gets
   end
 
+  test 'classifies network failures, rate limiting, and server errors as transient observations' do
+    failures = [
+      Timeout::Error.new('timed out'),
+      ForemanAnsibleAap::AapClient::HttpError.new(429),
+      ForemanAnsibleAap::AapClient::HttpError.new(503),
+    ]
+
+    failures.each do |failure|
+      client = build_client(FailingObservationTransport.new(failure))
+
+      error = assert_raises(ForemanAnsibleAap::AapClient::TransientError) do
+        client.job_status(91)
+      end
+
+      assert_match(/temporarily unavailable|HTTP (429|503)/, error.message)
+    end
+  end
+
+  test 'classifies authentication, authorization, and deleted jobs as permanent observations' do
+    expected_messages = {
+      401 => 'AAP authentication failed while observing job 91',
+      403 => 'AAP authorization failed while observing job 91',
+      404 => 'AAP job 91 no longer exists',
+    }
+
+    expected_messages.each do |status, message|
+      client = build_client(
+        FailingObservationTransport.new(ForemanAnsibleAap::AapClient::HttpError.new(status))
+      )
+
+      error = assert_raises(ForemanAnsibleAap::AapClient::PermanentError) do
+        client.job_status(91)
+      end
+
+      assert_equal message, error.message
+    end
+  end
+
+  test 'classifies structurally invalid observation responses as permanent' do
+    client = build_client(Transport.new)
+    client_transport = client.instance_variable_get(:@transport)
+    client_transport.define_singleton_method(:get) { |_path| { 'unexpected' => 'shape' } }
+
+    error = assert_raises(ForemanAnsibleAap::AapClient::PermanentError) do
+      client.job_status(91)
+    end
+
+    assert_equal 'AAP returned an invalid job 91 response', error.message
+
+    invalid_page_client = build_client(Transport.new)
+    invalid_page_transport = invalid_page_client.instance_variable_get(:@transport)
+    invalid_page_transport.define_singleton_method(:get) do |_path|
+      { 'results' => nil, 'next' => nil }
+    end
+
+    events_error = assert_raises(ForemanAnsibleAap::AapClient::PermanentError) do
+      invalid_page_client.job_events(91)
+    end
+
+    assert_equal 'AAP returned an invalid output for AAP job 91 response', events_error.message
+  end
+
   test 'cancels and rejects a launch when AAP ignores a safety-critical field' do
     transport = IgnoredLaunchTransport.new
     client = ForemanAnsibleAap::AapClient.new(
@@ -320,5 +394,13 @@ class AapClientTest < ActiveSupport::TestCase
 
     assert_match(/AAP might still be executing/, error.message)
     assert_equal 1, transport.launch_attempts
+  end
+
+  private
+
+  def build_client(transport)
+    ForemanAnsibleAap::AapClient.new(
+      controller_url: 'https://unused.example.test', token: 'secret', ca_bundle: nil, transport: transport
+    )
   end
 end

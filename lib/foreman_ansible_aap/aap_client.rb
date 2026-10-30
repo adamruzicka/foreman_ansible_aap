@@ -10,6 +10,26 @@ module ForemanAnsibleAap
     class RequestError < StandardError; end
     class DefinitiveRequestError < RequestError; end
     class AmbiguousRequestError < RequestError; end
+    class HttpError < DefinitiveRequestError
+      attr_reader :status
+
+      def initialize(status)
+        @status = Integer(status)
+        super("AAP request failed with HTTP #{status}")
+      end
+    end
+    class TransientError < RequestError; end
+    class PermanentError < RequestError; end
+
+    NETWORK_ERRORS = [
+      Timeout::Error,
+      SocketError,
+      EOFError,
+      IOError,
+      SystemCallError,
+      Net::OpenTimeout,
+      Net::ReadTimeout,
+    ].freeze
     class UnsafeLaunchError < StandardError; end
     class DefinitiveLaunchError < StandardError; end
     class AmbiguousLaunchError < StandardError; end
@@ -67,29 +87,35 @@ module ForemanAnsibleAap
     end
 
     def job_status(job_id)
-      transport.get("jobs/#{job_id}/").fetch('status')
+      observe("job #{job_id}", job_id: job_id) do
+        transport.get("jobs/#{job_id}/").fetch('status')
+      end
     end
 
     def job_events(job_id, after_id: nil)
-      path = "jobs/#{job_id}/job_events/?order_by=id&page_size=200"
-      path = "#{path}&id__gt=#{after_id}" if after_id
-      events = []
+      observe("output for AAP job #{job_id}") do
+        path = "jobs/#{job_id}/job_events/?order_by=id&page_size=200"
+        path = "#{path}&id__gt=#{after_id}" if after_id
+        events = []
 
-      while path
-        page = transport.get(path)
-        events.concat(page.fetch('results').map { |event| normalize_event(event) })
-        path = page['next']
+        while path
+          page = transport.get(path)
+          events.concat(page_results(page).map { |event| normalize_event(event) })
+          path = next_page(page)
+        end
+
+        events
       end
-
-      events
     end
 
     def host_summaries(job_id)
-      paginated_results("jobs/#{job_id}/job_host_summaries/?page_size=200").map do |summary|
-        {
-          host_name: summary['host_name'] || summary['name'],
-          successful: successful_summary?(summary),
-        }
+      observe("host summaries for AAP job #{job_id}", job_id: job_id) do
+        paginated_results("jobs/#{job_id}/job_host_summaries/?page_size=200").map do |summary|
+          {
+            host_name: summary.fetch('host_name') { summary.fetch('name') },
+            successful: successful_summary?(summary),
+          }
+        end
       end
     end
 
@@ -97,14 +123,59 @@ module ForemanAnsibleAap
 
     attr_reader :transport
 
+    def observe(label, job_id: nil)
+      yield
+    rescue HttpError => e
+      raise classify_http_error(e, label, job_id: job_id)
+    rescue AmbiguousRequestError => e
+      raise TransientError, "AAP #{label} is temporarily unavailable: #{e.message}"
+    rescue DefinitiveRequestError
+      raise PermanentError, "AAP returned an invalid #{label} response"
+    rescue *NETWORK_ERRORS => e
+      raise TransientError, "AAP #{label} is temporarily unavailable: #{e.class}"
+    rescue KeyError, TypeError, JSON::ParserError
+      raise PermanentError, "AAP returned an invalid #{label} response"
+    end
+
+    def classify_http_error(error, label, job_id:)
+      if error.status == 429 || error.status >= 500
+        return TransientError.new("AAP #{label} failed with HTTP #{error.status}")
+      end
+
+      case error.status
+      when 401
+        PermanentError.new("AAP authentication failed while observing #{label}")
+      when 403
+        PermanentError.new("AAP authorization failed while observing #{label}")
+      when 404
+        PermanentError.new(job_id ? "AAP job #{job_id} no longer exists" : "AAP #{label} no longer exists")
+      else
+        PermanentError.new("AAP #{label} failed permanently with HTTP #{error.status}")
+      end
+    end
+
     def paginated_results(path)
       results = []
       while path
         page = transport.get(path)
-        results.concat(page.fetch('results'))
-        path = page['next']
+        results.concat(page_results(page))
+        path = next_page(page)
       end
       results
+    end
+
+    def page_results(page)
+      results = page.fetch('results')
+      raise TypeError unless results.is_a?(Array)
+
+      results
+    end
+
+    def next_page(page)
+      path = page['next']
+      raise TypeError unless path.nil? || path.is_a?(String)
+
+      path
     end
 
     def expect(resource, field, expected, label)
@@ -212,9 +283,7 @@ module ForemanAnsibleAap
         end
 
         response = http_for(uri).request(request)
-        unless response.is_a?(Net::HTTPSuccess)
-          raise DefinitiveRequestError, "AAP request failed with HTTP #{response.code}"
-        end
+        raise HttpError, response.code unless response.is_a?(Net::HTTPSuccess)
 
         JSON.parse(response.body)
       rescue JSON::ParserError => e

@@ -34,4 +34,31 @@ class ResultSettlerTest < ActiveSupport::TestCase
     diagnostic = failed.template_invocation_events.find_by(event_type: 'stdout')
     assert_equal 'AAP reported this host as unreachable', diagnostic.event
   end
+
+  test 'does not corrupt a persisted host outcome when settlement is replayed after restart' do
+    invocation = FactoryBot.build(:job_invocation)
+    template_invocation = FactoryBot.build(
+      :template_invocation, :with_task, :with_host, job_invocation: invocation
+    )
+    invocation.template_invocations = [template_invocation]
+    invocation.save!
+    execution = ForemanAnsibleAap::Execution.create!(job_invocation: invocation)
+    record = ForemanAnsibleAap::HostExecution.create!(
+      execution: execution,
+      host: template_invocation.host,
+      template_invocation: template_invocation,
+      preparation_state: 'prepared'
+    )
+
+    ForemanAnsibleAap::ResultSettler.new([record]).success!(template_invocation.host)
+    restarted_settler = ForemanAnsibleAap::ResultSettler.new([record.reload])
+    restarted_settler.failure!(template_invocation.host, diagnostic: 'stale replay')
+
+    events = template_invocation.template_invocation_events.reload
+    assert_equal 1, events.where(external_id: 'aap-host-summary-exit').count
+    assert_equal '0', events.find_by(external_id: 'aap-host-summary-exit').event
+    assert_nil events.find_by(external_id: 'aap-host-summary-diagnostic')
+    assert_equal 'successful', record.reload.result_state
+    assert_nil record.result_error
+  end
 end
