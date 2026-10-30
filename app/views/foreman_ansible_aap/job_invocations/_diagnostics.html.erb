@@ -1,0 +1,8 @@
+<% diagnostics = job_invocation.aap_diagnostics %>
+<dl>
+  <dt><%= _('AAP job ID') %></dt>
+  <dd><%= diagnostics[:job_id] %></dd>
+  <dt><%= _('AAP job') %></dt>
+  <dd><%= link_to(_('AAP job %s') % diagnostics[:job_id], diagnostics[:job_url], target: '_blank', rel: 'noopener noreferrer') %></dd>
+</dl>
+<p class="help-block"><%= diagnostics[:limitations] %></p>

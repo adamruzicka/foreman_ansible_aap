@@ -92,6 +92,25 @@ module ForemanAnsibleAap
       assert_equal %w[error error], (hosts.map { |host| invocation.sub_task_for_host(host).result })
     end
 
+    test 'unsupported invocation controls fail before publication and never fall back to a proxy' do
+      host = FactoryBot.create(:host)
+      invocation = build_invocation([host])
+      invocation.update_column(:ssh_user, 'proxy-managed-user') # rubocop:disable Rails/SkipsModelValidations
+      Configuration.stubs(:from_settings).returns(configuration)
+      AapClient.any_instance.expects(:preflight!).never
+      PlaybookRenderer.any_instance.expects(:render).never
+      GitPublisher.any_instance.expects(:publish).never
+      ForemanAnsible::AnsibleProvider.expects(:execution_action).never
+
+      trigger(invocation)
+
+      execution = Execution.find_by!(job_invocation: invocation)
+      assert_equal 'failed', execution.aggregate_state
+      assert_includes execution.aggregate_error, 'Ssh user'
+      assert_equal 'failed', execution.host_executions.first.result_state
+      assert_equal 'error', invocation.sub_task_for_host(host).result
+    end
+
     test 'failed-host rerun creates an independently auditable AAP invocation for every failure kind' do
       original_driver = Setting[:ansible_execution_driver]
       Setting[:ansible_execution_driver] = 'aap'

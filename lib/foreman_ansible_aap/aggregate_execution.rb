@@ -160,6 +160,7 @@ module ForemanAnsibleAap
     end
 
     def preflight!
+      UnsupportedControls.new(job_invocation, aap: true).validate!
       aap_client.preflight!(
         job_template_id: configuration.job_template_id,
         inventory_id: configuration.inventory_id,

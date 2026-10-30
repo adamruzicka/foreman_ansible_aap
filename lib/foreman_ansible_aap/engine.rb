@@ -24,5 +24,12 @@ module ForemanAnsibleAap
         require 'foreman_ansible_aap/register'
       end
     end
+
+    config.to_prepare do
+      ::JobInvocation.include ForemanAnsibleAap::JobInvocationExtensions
+      ::Api::V2::JobInvocationsController.prepend(
+        ForemanAnsibleAap::Api::JobInvocationsControllerExtensions
+      )
+    end
   end
 end
