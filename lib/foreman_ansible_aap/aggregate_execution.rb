@@ -21,12 +21,7 @@ module ForemanAnsibleAap
     end
 
     def call
-      preflight!
-      playbook = renderer.render(job_invocation)
-      commit_sha = publish(playbook)
-      persist_artifact(commit_sha)
-      remote_job = launch
-      persist_remote_job(remote_job)
+      remote_job, commit_sha = prepare_and_launch
       wait_for_success(remote_job.fetch(:id))
       settle_successful_hosts(remote_job.fetch(:id))
 
@@ -34,6 +29,19 @@ module ForemanAnsibleAap
     end
 
     private
+
+    def prepare_and_launch
+      preflight!
+      playbook = renderer.render(job_invocation)
+      commit_sha = publish(playbook)
+      persist_artifact(commit_sha)
+      remote_job = launch
+      persist_remote_job(remote_job)
+      [remote_job, commit_sha]
+    rescue StandardError => error
+      fail_prepared_hosts(error.message)
+      raise
+    end
 
     def result(remote_job, commit_sha)
       Result.new(
@@ -94,6 +102,13 @@ module ForemanAnsibleAap
         aap_job_id: remote_job.fetch(:id),
         aap_job_url: remote_job.fetch(:url)
       )
+    rescue StandardError => error
+      raise AapClient::AmbiguousLaunchError,
+        "AAP job coordinates could not be persisted; AAP might still be executing: #{error.message}"
+    end
+
+    def fail_prepared_hosts(diagnostic)
+      prepared_hosts.each { |host| result_settler.failure!(host, diagnostic) }
     end
 
     def wait_for_success(job_id)

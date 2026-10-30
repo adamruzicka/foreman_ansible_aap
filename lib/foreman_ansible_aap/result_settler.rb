@@ -17,6 +17,27 @@ module ForemanAnsibleAap
       )
     end
 
+    def failure!(host, diagnostic)
+      invocation = template_invocations.fetch(host.name)
+      timestamp = Time.zone.now
+      TemplateInvocationEvent.transaction do
+        TemplateInvocationEvent.create!(
+          template_invocation: invocation,
+          external_id: 'aap-integration-failure',
+          event: diagnostic,
+          event_type: 'stderr',
+          timestamp: timestamp
+        )
+        TemplateInvocationEvent.create!(
+          template_invocation: invocation,
+          external_id: 'aap-host-summary-exit',
+          event: '1',
+          event_type: 'exit',
+          timestamp: timestamp + 0.000001
+        )
+      end
+    end
+
     private
 
     attr_reader :template_invocations

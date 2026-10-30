@@ -8,6 +8,13 @@ module ForemanAnsibleAap
   class AapClient
     class ConfigurationError < StandardError; end
     class RequestError < StandardError; end
+    class DefinitiveRequestError < RequestError; end
+    class AmbiguousRequestError < RequestError; end
+    class UnsafeLaunchError < StandardError; end
+    class DefinitiveLaunchError < StandardError; end
+    class AmbiguousLaunchError < StandardError; end
+
+    SAFETY_CRITICAL_LAUNCH_FIELDS = %w[scm_branch limit extra_vars].freeze
 
     def initialize(controller_url:, token:, ca_bundle:, transport: nil)
       @transport = transport || HttpsTransport.new(
@@ -46,7 +53,17 @@ module ForemanAnsibleAap
         'extra_vars' => attributes.fetch(:extra_vars)
       )
       id = response.fetch('id')
+      validate_launch_response!(response, attributes, id)
       { id: id, url: absolute_url(response.fetch('url')) }
+    rescue DefinitiveRequestError => error
+      raise DefinitiveLaunchError, "AAP rejected the launch: #{error.message}"
+    rescue AmbiguousRequestError, KeyError, JSON::ParserError => error
+      raise AmbiguousLaunchError,
+        "AAP launch could not be confirmed or persisted; AAP might still be executing: #{error.message}"
+    end
+
+    def cancel(job_id)
+      transport.post("jobs/#{job_id}/cancel/", {})
     end
 
     def job_status(job_id)
@@ -87,6 +104,48 @@ module ForemanAnsibleAap
       return if actual == expected
 
       raise ConfigurationError, "#{label} is #{actual.inspect}, expected #{expected.inspect}"
+    end
+
+    def validate_launch_response!(response, attributes, job_id)
+      ignored_fields = response.fetch('ignored_fields', {})
+      ignored_names = ignored_fields.respond_to?(:keys) ? ignored_fields.keys : Array(ignored_fields)
+      unsafe_ignored_names = ignored_names.map(&:to_s) & SAFETY_CRITICAL_LAUNCH_FIELDS
+      message = if unsafe_ignored_names.any?
+                  "AAP ignored safety-critical launch fields: #{unsafe_ignored_names.join(', ')}"
+                else
+                  mismatched_launch_message(response, attributes)
+                end
+      return unless message
+
+      cancellation_error = begin
+        cancel(job_id)
+        nil
+      rescue StandardError => error
+        error
+      end
+      message = "#{message}; cancellation request failed: #{cancellation_error.message}" if cancellation_error
+      raise UnsafeLaunchError, message
+    end
+
+    def mismatched_launch_message(response, attributes)
+      {
+        'scm_branch' => attributes.fetch(:scm_branch),
+        'limit' => attributes.fetch(:limit),
+        'extra_vars' => attributes.fetch(:extra_vars),
+      }.each do |field, expected|
+        next unless response.key?(field)
+
+        actual = response.fetch(field)
+        if field == 'extra_vars'
+          actual = JSON.parse(actual) if actual.is_a?(String)
+          expected = JSON.parse(JSON.generate(expected))
+          actual = JSON.parse(JSON.generate(actual))
+        end
+        return "AAP returned a different #{field} for the launched job" unless actual == expected
+      end
+      nil
+    rescue JSON::ParserError
+      'AAP returned invalid extra_vars for the launched job'
     end
 
     def successful_summary?(summary)
@@ -144,9 +203,15 @@ module ForemanAnsibleAap
         end
 
         response = http_for(uri).request(request)
-        raise RequestError, "AAP request failed with HTTP #{response.code}" unless response.is_a?(Net::HTTPSuccess)
+        unless response.is_a?(Net::HTTPSuccess)
+          raise DefinitiveRequestError, "AAP request failed with HTTP #{response.code}"
+        end
 
         JSON.parse(response.body)
+      rescue JSON::ParserError => error
+        raise DefinitiveRequestError, "AAP returned invalid JSON: #{error.message}"
+      rescue Net::OpenTimeout, Net::ReadTimeout, EOFError, IOError, SocketError, SystemCallError => error
+        raise AmbiguousRequestError, "AAP connection failed: #{error.message}"
       end
 
       def http_for(uri)

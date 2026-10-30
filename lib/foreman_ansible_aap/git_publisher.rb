@@ -9,8 +9,14 @@ module ForemanAnsibleAap
   class GitPublisher
     class PublicationError < StandardError; end
 
+    DETERMINISTIC_COMMIT_ENVIRONMENT = {
+      'GIT_AUTHOR_DATE' => '2000-01-01T00:00:00Z',
+      'GIT_COMMITTER_DATE' => '2000-01-01T00:00:00Z',
+    }.freeze
+
     def publish(attributes)
       validate_path!(attributes.fetch(:path))
+      validate_ref!(attributes.fetch(:ref))
       Dir.mktmpdir('foreman-ansible-aap') do |directory|
         environment = credential_environment(directory, attributes)
         repository = File.join(directory, 'repository')
@@ -18,11 +24,25 @@ module ForemanAnsibleAap
         run(environment, 'git', 'checkout', attributes.fetch(:base_ref), chdir: repository)
         write_playbook(repository, attributes.fetch(:path), attributes.fetch(:content))
         run(environment, 'git', 'add', '--', attributes.fetch(:path), chdir: repository)
-        run(environment, 'git', '-c', 'user.name=Foreman AAP', '-c', 'user.email=foreman-aap@localhost',
+        commit_environment = environment.merge(DETERMINISTIC_COMMIT_ENVIRONMENT)
+        run(commit_environment, 'git', '-c', 'user.name=Foreman AAP', '-c', 'user.email=foreman-aap@localhost',
           'commit', '-m', "Foreman Job Invocation #{attributes.fetch(:ref)}", chdir: repository)
         commit_sha = run(environment, 'git', 'rev-parse', 'HEAD', chdir: repository).strip
-        run(environment, 'git', 'push', 'origin', "HEAD:refs/heads/#{attributes.fetch(:ref)}", chdir: repository)
-        commit_sha
+        expected_tree = run(environment, 'git', 'rev-parse', 'HEAD^{tree}', chdir: repository).strip
+        existing_sha = remote_ref_sha(environment, repository, attributes.fetch(:ref))
+        return matching_existing_sha!(environment, repository, attributes.fetch(:ref), existing_sha, expected_tree) if existing_sha
+
+        begin
+          run(environment, 'git', 'push', 'origin', "HEAD:refs/heads/#{attributes.fetch(:ref)}", chdir: repository)
+          commit_sha
+        rescue PublicationError
+          # A concurrent publisher may have won the create-only race. Re-read the
+          # immutable ref and accept it only when it points at the same tree.
+          existing_sha = remote_ref_sha(environment, repository, attributes.fetch(:ref))
+          raise unless existing_sha
+
+          matching_existing_sha!(environment, repository, attributes.fetch(:ref), existing_sha, expected_tree)
+        end
       end
     end
 
@@ -33,6 +53,13 @@ module ForemanAnsibleAap
       return unless pathname.absolute? || pathname.each_filename.include?('..')
 
       raise PublicationError, "Generated playbook path must stay inside the repository: #{path}"
+    end
+
+    def validate_ref!(ref)
+      return if ref.match?(%r{\A[A-Za-z0-9][A-Za-z0-9._/-]*\z}) &&
+        !ref.include?('..') && !ref.end_with?('/') && !ref.include?('//')
+
+      raise PublicationError, "Generated Git ref is invalid: #{ref.inspect}"
     end
 
     def credential_environment(directory, attributes)
@@ -55,8 +82,28 @@ module ForemanAnsibleAap
 
     def write_playbook(repository, path, content)
       destination = File.join(repository, path)
+      relative = Pathname.new(destination).relative_path_from(Pathname.new(repository))
+      relative.descend do |component|
+        candidate = File.join(repository, component.to_s)
+        if File.symlink?(candidate)
+          raise PublicationError, "Generated playbook path contains a symbolic link: #{path}"
+        end
+      end
       FileUtils.mkdir_p(File.dirname(destination))
       File.write(destination, content)
+    end
+
+    def remote_ref_sha(environment, repository, ref)
+      output = run(environment, 'git', 'ls-remote', '--heads', 'origin', "refs/heads/#{ref}", chdir: repository)
+      output.split.first
+    end
+
+    def matching_existing_sha!(environment, repository, ref, existing_sha, expected_tree)
+      run(environment, 'git', 'fetch', 'origin', "refs/heads/#{ref}", chdir: repository)
+      existing_tree = run(environment, 'git', 'rev-parse', 'FETCH_HEAD^{tree}', chdir: repository).strip
+      return existing_sha if existing_tree == expected_tree
+
+      raise PublicationError, "Generated Git ref #{ref} already exists with different content"
     end
 
     def run(environment, *command, chdir: nil)
