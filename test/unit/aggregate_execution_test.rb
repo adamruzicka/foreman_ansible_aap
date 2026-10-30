@@ -99,6 +99,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
         { host_name: 'node-1.example.test', successful: true },
         { host_name: 'node-2.example.test', successful: true },
       ]
+      @queued_summaries = @summaries.any? { |summary| summary.is_a?(Exception) }
     end
 
     def preflight!(contract)
@@ -124,7 +125,10 @@ class AggregateExecutionTest < ActiveSupport::TestCase
 
     def host_summaries(job_id)
       @summary_requests << job_id
-      @summaries
+      response = @queued_summaries ? @summaries.shift : @summaries
+      raise response if response.is_a?(Exception)
+
+      response
     end
 
     def cancel!(job_id)
@@ -305,7 +309,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       settler,
       event_ingestor: event_ingestor
     )
-    3.times { refute execution.advance.complete? }
+    3.times { assert_not execution.advance.complete? }
     execution_record.update!(cancellation_requested_at: Time.zone.now)
 
     refute execution.advance.complete?
@@ -333,7 +337,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     )
     settler = ResultSettler.new
     execution = build_execution(execution_record, [host], aap_client, settler)
-    3.times { refute execution.advance.complete? }
+    3.times { assert_not execution.advance.complete? }
     execution_record.update!(cancellation_requested_at: Time.zone.now)
 
     refute execution.advance.complete?
@@ -736,6 +740,62 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     assert_equal 'successful', execution_record.attributes[:aap_status]
   end
 
+  test 'yields between transient polling retries so cancellation activity can be observed' do
+    execution_record = Record.new
+    host = Host.new('node-1.example.test')
+    transient = ForemanAnsibleAap::AapClient::TransientError.new(
+      'AAP job 91 temporarily unavailable'
+    )
+    aap_client = AapClient.new(
+      execution_record,
+      statuses: [transient, 'running', 'canceled'],
+      summaries: []
+    )
+    settler = ResultSettler.new
+    sleeper = Sleeper.new
+    execution = build_execution(
+      execution_record, [host], aap_client, settler, sleeper: sleeper
+    )
+    3.times { assert_not execution.advance.complete? }
+
+    retry_step = execution.advance
+
+    assert_not retry_step.complete?
+    assert_equal 1, retry_step.retry_after
+    assert_empty sleeper.durations
+
+    execution_record.update!(cancellation_requested_at: Time.zone.now)
+    active_step = execution.advance
+
+    assert_not active_step.complete?
+    assert_equal [91], aap_client.cancellations
+  end
+
+  test 'preserves exponential backoff across yielded host-summary retries' do
+    execution_record = Record.new
+    host = Host.new('node-1.example.test')
+    transient = ForemanAnsibleAap::AapClient::TransientError
+    aap_client = AapClient.new(
+      execution_record,
+      statuses: %w[successful successful successful],
+      summaries: [
+        transient.new('summary page temporarily unavailable'),
+        transient.new('summary page still unavailable'),
+        [{ host_name: host.name, successful: true }],
+      ]
+    )
+    sleeper = Sleeper.new
+    settler = ResultSettler.new
+
+    build_execution(
+      execution_record, [host], aap_client, settler, sleeper: sleeper
+    ).call
+
+    assert_equal [1, 2], sleeper.durations
+    assert_equal [host], settler.successful_hosts
+    assert_equal 0, execution_record.attributes[:polling_failure_count]
+  end
+
   test 'continues observing queued and running AAP work without a Foreman retry deadline' do
     execution_record = Record.new
     host = Host.new('node-1.example.test')
@@ -849,8 +909,8 @@ class AggregateExecutionTest < ActiveSupport::TestCase
   end
 
   def aggregate(hosts:, execution_record: Record.new, renderer: Renderer.new, publisher: Publisher.new,
-      aap_client: AapClient.new(Record.new, []), settler: ResultSettler.new,
-      event_ingestor: EventIngestor.new([]), sleeper: Sleeper.new)
+                aap_client: AapClient.new(Record.new, []), settler: ResultSettler.new,
+                event_ingestor: EventIngestor.new([]), sleeper: Sleeper.new)
     configuration = ForemanAnsibleAap::Configuration.new(
       controller_url: 'https://aap.example.test',
       service_token: 'controller-secret',

@@ -38,8 +38,10 @@ module Actions
 
       def run(_event = nil)
         record = host_execution.reload
-        prepare!(record) if record.preparation_state == 'pending'
-        raise PreparationError, record.preparation_error if record.preparation_state == 'failed'
+        prepare!(record) if record.preparation_state == ::ForemanAnsibleAap::Lifecycle::Preparation::PENDING
+        if record.preparation_state == ::ForemanAnsibleAap::Lifecycle::Preparation::FAILED
+          raise PreparationError, record.preparation_error
+        end
 
         finish_or_wait(record)
       end
@@ -78,11 +80,11 @@ module Actions
 
       def finish_or_wait(record)
         case record.result_state
-        when 'successful'
+        when ::ForemanAnsibleAap::Lifecycle::Result::SUCCESSFUL
           nil
-        when 'failed'
+        when ::ForemanAnsibleAap::Lifecycle::Result::FAILED
           raise PreparationError, record.result_error
-        when 'cancelled'
+        when ::ForemanAnsibleAap::Lifecycle::Result::CANCELLED
           error! ::ForemanTasks::Task::TaskCancelledException.new(_('Task cancelled'))
         else
           suspend
@@ -96,11 +98,17 @@ module Actions
       def prepare!(record)
         verify_permissions(record.host, record.template_invocation)
         validate_local_preparation!(record.template_invocation)
-        record.update!(preparation_state: 'prepared', preparation_error: nil)
+        transition_preparation!(record, ::ForemanAnsibleAap::Lifecycle::Preparation::PREPARED)
       rescue StandardError => e
         message = e.message.presence || e.class.name
-        record.update!(preparation_state: 'failed', preparation_error: message)
+        transition_preparation!(record, ::ForemanAnsibleAap::Lifecycle::Preparation::FAILED, message)
         raise PreparationError, message
+      end
+
+      def transition_preparation!(record, state, error = nil)
+        ::ForemanAnsibleAap::Lifecycle.transition!(
+          record, :preparation_state, to: state, preparation_error: error
+        )
       end
 
       def validate_local_preparation!(template_invocation)

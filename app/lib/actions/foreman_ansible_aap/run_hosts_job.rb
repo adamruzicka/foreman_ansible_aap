@@ -53,7 +53,7 @@ module Actions
       end
 
       def polling_interval
-        1
+        output.fetch(:aap_polling_interval, 1)
       end
 
       def record_output(result)
@@ -71,7 +71,9 @@ module Actions
       # Dynflow cancellation to the lightweight host tasks: they wait for the
       # authoritative aggregate outcome instead.
       def cancel!(_force = false)
-        execution_record.update!(cancellation_requested_at: Time.zone.now) unless execution_record.cancellation_requested_at
+        unless execution_record.cancellation_requested_at
+          execution_record.update!(cancellation_requested_at: Time.zone.now)
+        end
         output[:cancelled_timestamp] ||= Time.now.utc.iso8601
       end
 
@@ -80,8 +82,12 @@ module Actions
       end
 
       def check_for_errors!
-        if execution_record.aggregate_state == 'cancelled'
-          error! ::ForemanTasks::Task::TaskCancelledException.new(_('Task cancelled'))
+        case execution_record.aggregate_state
+        when ::ForemanAnsibleAap::Lifecycle::Aggregate::FAILED
+          raise ::ForemanAnsibleAap::AggregateExecution::ExecutionError,
+            execution_record.aggregate_error
+        when ::ForemanAnsibleAap::Lifecycle::Aggregate::CANCELLED
+          raise ::ForemanTasks::Task::TaskCancelledException, _('Task cancelled')
         else
           super
         end
@@ -128,22 +134,32 @@ module Actions
       end
 
       def prepared_host_records
-        host_execution_records.select { |record| record.preparation_state == 'prepared' }
+        host_execution_records.select do |record|
+          record.preparation_state == ::ForemanAnsibleAap::Lifecycle::Preparation::PREPARED
+        end
       end
 
       def skip_aggregate
-        execution_record.update!(aggregate_state: 'skipped', aggregate_error: nil)
+        ::ForemanAnsibleAap::Lifecycle.transition!(
+          execution_record,
+          :aggregate_state,
+          to: ::ForemanAnsibleAap::Lifecycle::Aggregate::SKIPPED,
+          aggregate_error: nil
+        )
       end
 
       def record_aggregate_failure(error)
-        execution_record.update!(aggregate_state: 'failed', aggregate_error: error.message)
+        ::ForemanAnsibleAap::Lifecycle.transition!(
+          execution_record,
+          :aggregate_state,
+          to: ::ForemanAnsibleAap::Lifecycle::Aggregate::FAILED,
+          aggregate_error: error.message
+        )
         output[:aggregate_error] = error.message
       end
 
       def execute_aggregate(prepared_records)
-        if execution_record.aggregate_state == 'pending'
-          execution_record.update!(aggregate_state: 'running', aggregate_error: nil)
-        end
+        start_aggregate!
         step = ::ForemanAnsibleAap::AggregateExecution.new(
           job_invocation: job_invocation,
           execution_record: execution_record,
@@ -151,12 +167,41 @@ module Actions
           configuration: configuration,
           dependencies: execution_dependencies(prepared_records)
         ).advance
+        output[:aap_polling_interval] = step.retry_after || 1
         return unless step.complete?
 
-        aggregate_state = step.result.state == 'cancelled' ? 'cancelled' : 'successful'
-        execution_record.update!(aggregate_state: aggregate_state, aggregate_error: nil)
-        record_output(step.result)
+        finish_aggregate!(step.result)
+      end
+
+      def start_aggregate!
+        pending = ::ForemanAnsibleAap::Lifecycle::Aggregate::PENDING
+        return unless execution_record.aggregate_state == pending
+
+        ::ForemanAnsibleAap::Lifecycle.transition!(
+          execution_record,
+          :aggregate_state,
+          to: ::ForemanAnsibleAap::Lifecycle::Aggregate::RUNNING,
+          aggregate_error: nil
+        )
+      end
+
+      def finish_aggregate!(result)
+        ::ForemanAnsibleAap::Lifecycle.transition!(
+          execution_record,
+          :aggregate_state,
+          to: aggregate_state_for(result),
+          aggregate_error: nil
+        )
+        record_output(result)
         complete_aggregate
+      end
+
+      def aggregate_state_for(result)
+        if result.state == ::ForemanAnsibleAap::Lifecycle::Result::CANCELLED
+          ::ForemanAnsibleAap::Lifecycle::Aggregate::CANCELLED
+        else
+          ::ForemanAnsibleAap::Lifecycle::Aggregate::SUCCESSFUL
+        end
       end
 
       def complete_aggregate
@@ -174,7 +219,9 @@ module Actions
 
       def preparation_complete?
         records = host_execution_records
-        records.size == total_count && records.none? { |record| record.preparation_state == 'pending' }
+        records.size == total_count && records.none? do |record|
+          record.preparation_state == ::ForemanAnsibleAap::Lifecycle::Preparation::PENDING
+        end
       end
 
       def host_execution_records

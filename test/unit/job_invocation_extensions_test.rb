@@ -15,7 +15,15 @@ class JobInvocationExtensionsTest < ActiveSupport::TestCase
     execution = ForemanAnsibleAap::Execution.create!(
       job_invocation: @invocation,
       aap_job_id: 91,
-      aap_job_url: 'https://aap.example.test/api/controller/v2/jobs/91/'
+      aap_job_url: 'https://aap.example.test/api/controller/v2/jobs/91/',
+      event_diagnostics: JSON.generate([{
+        external_id: 'aap-job-91-event-7',
+        host_name: 'delegate.example.test',
+        output: 'delegated startup output',
+        timestamp: '2026-10-30T09:00:00Z',
+      }]),
+      output_incomplete: true,
+      output_failure_diagnostic: 'AAP output page 2 was unavailable'
     )
 
     assert_equal execution, @invocation.reload.aap_execution
@@ -23,6 +31,14 @@ class JobInvocationExtensionsTest < ActiveSupport::TestCase
       job_id: 91,
       job_url: 'https://aap.example.test/api/controller/v2/jobs/91/',
       limitations: 'Host-filtered cancellation and peripheral task-based integrations are not supported for AAP jobs.',
+      invocation_diagnostics: [{
+        'external_id' => 'aap-job-91-event-7',
+        'host_name' => 'delegate.example.test',
+        'output' => 'delegated startup output',
+        'timestamp' => '2026-10-30T09:00:00Z',
+      }],
+      output_incomplete: true,
+      output_failure_diagnostic: 'AAP output page 2 was unavailable',
     }, @invocation.aap_diagnostics)
   end
 
@@ -31,10 +47,23 @@ class JobInvocationExtensionsTest < ActiveSupport::TestCase
       @invocation.public_send("#{attribute}=", value)
 
       assert_not @invocation.valid?, "expected #{attribute} to be rejected"
-      assert_includes @invocation.errors[:base].join(' '), attribute.to_s.humanize
+      assert_includes @invocation.errors[:base].join(' '), 'not supported by the AAP execution driver'
 
       @invocation.public_send("#{attribute}=", nil)
     end
+  end
+
+  test 'raw API parameters and invocation models share one unsupported-control policy' do
+    @invocation.ssh_user = 'proxy-managed-user'
+    model_messages = ForemanAnsibleAap::UnsupportedControls.new(@invocation).messages
+
+    parameter_messages = ForemanAnsibleAap::UnsupportedControls.for_params(
+      { ssh_user: 'proxy-managed-user' },
+      aap: true
+    ).messages
+
+    assert_equal model_messages, parameter_messages
+    assert_equal ['SSH user is not supported by the AAP execution driver'], parameter_messages
   end
 
   test 'AAP invocations reject an explicitly selected proxy' do

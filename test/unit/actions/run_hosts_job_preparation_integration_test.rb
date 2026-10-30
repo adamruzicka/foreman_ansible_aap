@@ -92,6 +92,21 @@ module ForemanAnsibleAap
       assert_equal %w[error error], (hosts.map { |host| invocation.sub_task_for_host(host).result })
     end
 
+    test 'aggregate AAP failure fails the parent while preserving successful host outcomes' do
+      hosts = [FactoryBot.create(:host), FactoryBot.create(:host)]
+      invocation = build_invocation(hosts)
+      stub_failed_aggregate_with_successful_hosts(hosts)
+
+      task = trigger(invocation)
+
+      execution = Execution.find_by!(job_invocation: invocation)
+      assert_equal 'failed', execution.aggregate_state
+      assert_includes execution.aggregate_error, 'finished with status'
+      assert_equal 'error', task.result
+      assert_equal %w[success success], invocation.reload.template_invocation_tasks.order(:id).pluck(:result)
+      assert(execution.host_executions.all? { |record| record.result_state == 'successful' })
+    end
+
     test 'unsupported invocation controls fail before publication and never fall back to a proxy' do
       host = FactoryBot.create(:host)
       invocation = build_invocation([host])
@@ -106,7 +121,7 @@ module ForemanAnsibleAap
 
       execution = Execution.find_by!(job_invocation: invocation)
       assert_equal 'failed', execution.aggregate_state
-      assert_includes execution.aggregate_error, 'Ssh user'
+      assert_includes execution.aggregate_error, 'SSH user'
       assert_equal 'failed', execution.host_executions.first.result_state
       assert_equal 'error', invocation.sub_task_for_host(host).result
     end
@@ -240,6 +255,22 @@ module ForemanAnsibleAap
         hosts.map { |host| { host_name: host.name, successful: true } }
       )
       launches
+    end
+
+    def stub_failed_aggregate_with_successful_hosts(hosts)
+      Configuration.stubs(:from_settings).returns(configuration)
+      PlaybookRenderer.any_instance.expects(:render).once.returns("---\n- hosts: all\n")
+      GitPublisher.any_instance.expects(:publish).once.returns('a' * 40)
+      AapClient.any_instance.expects(:preflight!).once
+      AapClient.any_instance.expects(:launch).once.returns(
+        id: 1,
+        url: 'https://aap.example.test/jobs/1/'
+      )
+      AapClient.any_instance.expects(:job_status).once.with(1).returns('failed')
+      AapClient.any_instance.expects(:job_events).once.with(1, after_id: nil).returns([])
+      AapClient.any_instance.expects(:host_summaries).once.with(1).returns(
+        hosts.map { |host| { host_name: host.name, successful: true } }
+      )
     end
 
     def stub_rerun_external_work(hosts:, execution_host:, unreachable_host:, **captured)
