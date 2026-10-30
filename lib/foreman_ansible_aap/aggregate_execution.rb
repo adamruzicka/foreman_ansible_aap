@@ -21,6 +21,8 @@ module ForemanAnsibleAap
     end
 
     def call
+      return Result.new if prepared_hosts.empty?
+
       remote_job, commit_sha = start_remote_job
       finish_remote_job(remote_job)
 
@@ -136,7 +138,7 @@ module ForemanAnsibleAap
 
     def fail_prepared_hosts(diagnostic)
       prepared_hosts.each do |host|
-        result_settler.failure!(host, diagnostic: diagnostic)
+        result_settler.failure!(host, diagnostic: diagnostic, error: diagnostic)
       end
     end
 

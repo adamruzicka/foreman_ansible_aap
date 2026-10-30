@@ -34,16 +34,19 @@ module ForemanAnsibleAap
       action.stubs(:hosts).returns(hosts)
       action.stubs(:current_batch).returns(hosts)
       action.stubs(:job_invocation).returns(job_invocation)
+      execution_record = stub('execution record')
+      action.stubs(:execution_record).returns(execution_record)
       template_invocation = stub(new_record?: true)
       job_invocation.stubs(:pattern_template_invocation_for_host)
                     .returns(stub(deep_clone: template_invocation))
 
       assert_equal 2, action.batch_size
-      action.expects(:trigger).with do |action_class, invocation, host, planned_invocation|
+      action.expects(:trigger).with do |action_class, invocation, host, planned_invocation, planned_execution|
         action_class == Actions::ForemanAnsibleAap::RunHostJob &&
           invocation == job_invocation &&
           hosts.include?(host) &&
-          planned_invocation.new_record?
+          planned_invocation.new_record? &&
+          execution_record == planned_execution
       end.twice
 
       assert_equal 2, action.create_sub_plans.size
@@ -65,9 +68,16 @@ module ForemanAnsibleAap
       )
       host_action.expects(:link!).with(job_invocation)
       host_action.expects(:link!).with(template_invocation)
-      host_action.expects(:plan_self)
+      execution_record = stub('execution record')
+      host_execution = stub(id: 11)
+      ::ForemanAnsibleAap::HostExecution.expects(:create!).with(
+        execution: execution_record,
+        host: host,
+        template_invocation: template_invocation
+      ).returns(host_execution)
+      host_action.expects(:plan_self).with(host_execution_id: 11)
 
-      host_action.plan(job_invocation, host, template_invocation)
+      host_action.plan(job_invocation, host, template_invocation, execution_record)
     end
 
     test 'exposes persisted AAP output through the host task live output interface' do

@@ -137,7 +137,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       @successful_hosts << host
     end
 
-    def failure!(host, diagnostic:)
+    def failure!(host, diagnostic:, error: diagnostic)
       @failed_hosts << [host, diagnostic]
     end
   end
@@ -349,6 +349,46 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     assert_equal 1, aap_client.launches.size
     assert_empty aap_client.status_requests
     assert_equal hosts, settler.failed_hosts.map(&:first)
+  end
+
+  test 'limits the aggregate launch to the successfully prepared subset' do
+    execution_record = Record.new
+    prepared_host = Host.new('node-2.example.test')
+    aap_client = AapClient.new(execution_record)
+    settler = ResultSettler.new
+
+    build_execution(execution_record, [prepared_host], aap_client, settler).call
+
+    assert_equal 1, aap_client.launches.size
+    assert_equal 'node-2.example.test', aap_client.launches.first.fetch(:limit)
+    assert_equal [prepared_host], settler.successful_hosts
+  end
+
+  test 'does no external or rendering work when no hosts were prepared' do
+    execution_record = Record.new
+    renderer = Renderer.new
+    publisher = Publisher.new
+    aap_client = AapClient.new(execution_record)
+
+    result = ForemanAnsibleAap::AggregateExecution.new(
+      job_invocation: Invocation.new(42),
+      execution_record: execution_record,
+      prepared_hosts: [],
+      configuration: nil,
+      dependencies: {
+        renderer: renderer,
+        publisher: publisher,
+        aap_client: aap_client,
+        event_ingestor: EventIngestor.new([]),
+        result_settler: ResultSettler.new,
+      }
+    ).call
+
+    assert_empty renderer.invocations
+    assert_empty publisher.publications
+    assert_empty aap_client.preflights
+    assert_empty aap_client.launches
+    assert_nil result.job_id
   end
 
   test 'preserves successful host summaries when the aggregate job fails' do

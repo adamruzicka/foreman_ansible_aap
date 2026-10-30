@@ -3,9 +3,8 @@
 require 'test_plugin_helper'
 
 class ResultSettlerTest < ActiveSupport::TestCase
-  test 'host task results drive existing successful and failed host selection' do
+  test 'host outcomes are durable until waiting host tasks consume them' do
     invocation = FactoryBot.build(:job_invocation)
-    invocation.task = FactoryBot.build(:some_task, started_at: Time.zone.now)
     successful = FactoryBot.build(:template_invocation, :with_task, :with_host, job_invocation: invocation)
     failed = FactoryBot.build(:template_invocation, :with_task, :with_host, job_invocation: invocation)
     invocation.template_invocations = [successful, failed]
@@ -13,20 +12,23 @@ class ResultSettlerTest < ActiveSupport::TestCase
     invocation.targeting.mark_resolved!
     invocation.targeting.save!
     invocation.save!
-    successful.run_host_job_task.update!(parent_task: invocation.task)
-    failed.run_host_job_task.update!(parent_task: invocation.task)
-    settler = ForemanAnsibleAap::ResultSettler.new(invocation.template_invocations.includes(:host))
+    execution = ForemanAnsibleAap::Execution.create!(job_invocation: invocation)
+    records = [successful, failed].map do |template_invocation|
+      ForemanAnsibleAap::HostExecution.create!(
+        execution: execution,
+        host: template_invocation.host,
+        template_invocation: template_invocation,
+        preparation_state: 'prepared'
+      )
+    end
+    settler = ForemanAnsibleAap::ResultSettler.new(records)
 
     settler.success!(successful.host)
     settler.failure!(failed.host, diagnostic: 'AAP reported this host as unreachable')
-    invocation.reload
 
-    assert_equal [successful.host.id], invocation.succeeded_host_ids
-    assert_equal [failed.host.id], invocation.failed_host_ids
-    assert_equal 1, invocation.progress_report[:success]
-    assert_equal 1, invocation.progress_report[:error]
-    assert_equal 1, invocation.progress_report[:failed]
-    assert_equal 100, invocation.progress_report[:progress]
+    assert_equal 'successful', records.first.reload.result_state
+    assert_equal 'failed', records.last.reload.result_state
+    assert_equal 'AAP reported this host as unreachable', records.last.result_error
     assert_equal '0', successful.template_invocation_events.find_by(event_type: 'exit').event
     assert_equal '1', failed.template_invocation_events.find_by(event_type: 'exit').event
     diagnostic = failed.template_invocation_events.find_by(event_type: 'stdout')
