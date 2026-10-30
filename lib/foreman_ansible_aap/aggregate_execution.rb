@@ -135,6 +135,9 @@ module ForemanAnsibleAap
         aap_job_id: remote_job.fetch(:id),
         aap_job_url: remote_job.fetch(:url)
       )
+    rescue StandardError => e
+      raise AapClient::AmbiguousLaunchError,
+        "AAP job coordinates could not be persisted; AAP might still be executing: #{e.message}"
     end
 
     def wait_for_terminal(job_id)

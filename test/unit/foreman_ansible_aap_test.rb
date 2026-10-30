@@ -8,7 +8,7 @@ class ForemanAnsibleAapTest < ActiveSupport::TestCase
       ForemanAnsible.execution_drivers.fetch(:aap)
   end
 
-  test 'selects the AAP-owned aggregate action tree' do
+  test 'selects the AAP-owned aggregate action tree without a Smart Proxy fallback' do
     invocation = stub(ansible_execution_driver: 'aap')
 
     assert_equal Actions::ForemanAnsibleAap::RunHostsJob,
