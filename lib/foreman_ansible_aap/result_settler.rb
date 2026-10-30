@@ -26,12 +26,18 @@ module ForemanAnsibleAap
       )
     end
 
+    def settled?(host)
+      host_executions.fetch(host.name).result_state != 'pending'
+    end
+
     private
 
     attr_reader :host_executions
 
     def settle(record, exit_status:, result_state:, diagnostic: nil, error: nil)
-      TemplateInvocationEvent.transaction do
+      record.with_lock do
+        return unless record.result_state == 'pending'
+
         invocation = record.template_invocation
         create_event(invocation, 'aap-host-summary-diagnostic', diagnostic, 'stdout') if diagnostic
         create_event(invocation, 'aap-host-summary-exit', exit_status, 'exit')

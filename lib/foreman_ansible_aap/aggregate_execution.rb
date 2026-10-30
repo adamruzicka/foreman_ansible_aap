@@ -4,13 +4,23 @@ module ForemanAnsibleAap
   class AggregateExecution
     class ExecutionError < StandardError; end
 
-    Result = Struct.new(:job_id, :job_url, :commit_sha, :scm_ref, :state, keyword_init: true)
+    Result = Struct.new(
+      :job_id,
+      :job_url,
+      :commit_sha,
+      :scm_ref,
+      :state,
+      :output_incomplete,
+      :output_failure_diagnostic,
+      keyword_init: true
+    )
     Step = Struct.new(:complete, :result, keyword_init: true) do
       alias_method :complete?, :complete
     end
     ACTIVE_STATUSES = %w[new pending queued waiting running].freeze
     CANCELLED_STATUSES = %w[canceled cancelled].freeze
     SUCCESSFUL_STATUS = 'successful'
+    MAXIMUM_BACKOFF = 30
 
     def initialize(job_invocation:, execution_record:, prepared_hosts:, configuration:, dependencies:)
       @job_invocation = job_invocation
@@ -22,10 +32,11 @@ module ForemanAnsibleAap
       @aap_client = dependencies.fetch(:aap_client)
       @event_ingestor = dependencies.fetch(:event_ingestor)
       @result_settler = dependencies.fetch(:result_settler)
+      @sleeper = dependencies.fetch(:sleeper, ->(duration) { sleep duration })
     end
 
     def call
-      return Result.new(state: 'successful') if prepared_hosts.empty?
+      return Result.new(state: SUCCESSFUL_STATUS) if prepared_hosts.empty?
 
       loop do
         step = advance
@@ -35,9 +46,10 @@ module ForemanAnsibleAap
 
     def advance
       execution_record.reload
-      return finish_before_launch if cancellation_requested? && execution_record.aap_job_id.nil?
+      restore_launched_stage
+      return finish_before_launch if cancellation_requested? && execution_value(:aap_job_id).nil?
 
-      case execution_record.workflow_state
+      case execution_value(:workflow_state)
       when 'pending'
         preflight!
         execution_record.update!(workflow_state: 'preflighted')
@@ -55,24 +67,33 @@ module ForemanAnsibleAap
       when 'launched', 'polling'
         observe_remote_job
       when 'reconciled'
-        completed_result
+        complete(completed_state)
       else
-        raise ExecutionError, "Unknown aggregate workflow state #{execution_record.workflow_state.inspect}"
+        raise ExecutionError, "Unknown aggregate workflow state #{execution_value(:workflow_state).inspect}"
       end
+    rescue AapClient::PermanentError => e
+      diagnostic = "AAP integration permanently lost observability: #{e.message}"
+      fail_prepared_hosts(diagnostic: diagnostic, error: diagnostic)
+      raise ExecutionError, diagnostic
     rescue StandardError => e
-      fail_prepared_hosts(e) unless @host_outcomes_settled
+      fail_prepared_hosts(diagnostic: nil, error: e.message) unless @host_outcomes_settled
       raise
     end
 
     private
 
-    def completed_result(state = SUCCESSFUL_STATUS)
+    attr_reader :job_invocation, :execution_record, :prepared_hosts, :configuration, :renderer,
+      :publisher, :aap_client, :event_ingestor, :result_settler, :sleeper
+
+    def completed_result(state)
       Result.new(
-        job_id: execution_record.aap_job_id,
-        job_url: execution_record.aap_job_url,
-        commit_sha: execution_record.commit_sha,
-        scm_ref: execution_record.scm_ref,
-        state: state
+        job_id: execution_value(:aap_job_id),
+        job_url: execution_value(:aap_job_url),
+        commit_sha: execution_value(:commit_sha),
+        scm_ref: execution_value(:scm_ref),
+        state: state,
+        output_incomplete: execution_value(:output_incomplete) || false,
+        output_failure_diagnostic: execution_value(:output_failure_diagnostic)
       )
     end
 
@@ -84,6 +105,17 @@ module ForemanAnsibleAap
       Step.new(complete: true, result: completed_result(state))
     end
 
+    def completed_state
+      CANCELLED_STATUSES.include?(execution_value(:aap_status)) ? 'cancelled' : SUCCESSFUL_STATUS
+    end
+
+    def restore_launched_stage
+      return if execution_value(:aap_job_id).nil?
+      return if %w[launched polling reconciled].include?(execution_value(:workflow_state))
+
+      execution_record.update!(workflow_state: 'launched')
+    end
+
     def finish_before_launch
       prepared_hosts.each { |host| result_settler.cancelled!(host) }
       @host_outcomes_settled = true
@@ -92,10 +124,10 @@ module ForemanAnsibleAap
     end
 
     def observe_remote_job
-      job_id = execution_record.aap_job_id
-      status = normalize_status(aap_client.job_status(job_id))
-      event_ingestor.ingest(job_id)
+      job_id = execution_value(:aap_job_id)
+      status = normalize_status(with_polling_retries { aap_client.job_status(job_id) })
       execution_record.update!(workflow_state: 'polling', aap_status: status)
+      ingest_output(job_id)
 
       if ACTIVE_STATUSES.include?(status)
         request_remote_cancellation(job_id) if cancellation_requested?
@@ -106,7 +138,7 @@ module ForemanAnsibleAap
     end
 
     def request_remote_cancellation(job_id)
-      return if execution_record.cancellation_sent_at
+      return if execution_value(:cancellation_sent_at)
 
       # Record intent before crossing the HTTP boundary. A crash can therefore
       # lose a cancellation request, but can never duplicate one.
@@ -126,9 +158,6 @@ module ForemanAnsibleAap
 
       complete(SUCCESSFUL_STATUS)
     end
-
-    attr_reader :job_invocation, :execution_record, :prepared_hosts, :configuration, :renderer,
-      :publisher, :aap_client, :event_ingestor, :result_settler
 
     def preflight!
       aap_client.preflight!(
@@ -177,12 +206,16 @@ module ForemanAnsibleAap
         aap_job_id: remote_job.fetch(:id),
         aap_job_url: remote_job.fetch(:url)
       )
+    rescue StandardError => e
+      raise AapClient::AmbiguousLaunchError,
+        "AAP job coordinates could not be persisted; AAP might still be executing: #{e.message}"
     end
 
     def settle_hosts(job_id, cancelled: false)
+      summaries = with_polling_retries { aap_client.host_summaries(job_id) }
       failed_hosts = HostOutcomeReconciler.new(
         prepared_hosts: prepared_hosts,
-        summaries: aap_client.host_summaries(job_id),
+        summaries: summaries,
         result_settler: result_settler,
         cancelled: cancelled
       ).call
@@ -190,10 +223,41 @@ module ForemanAnsibleAap
       failed_hosts
     end
 
-    def fail_prepared_hosts(error)
+    def ingest_output(job_id)
+      event_ingestor.ingest(job_id)
+    rescue StandardError => e
+      execution_record.update!(
+        output_incomplete: true,
+        output_failure_diagnostic: e.message
+      )
+    end
+
+    def with_polling_retries
+      result = yield
+      execution_record.update!(polling_failure_count: 0, polling_failure_diagnostic: nil)
+      result
+    rescue AapClient::TransientError => e
+      failure_count = execution_value(:polling_failure_count).to_i + 1
+      execution_record.update!(
+        polling_failure_count: failure_count,
+        polling_failure_diagnostic: e.message
+      )
+      sleeper.call([2**(failure_count - 1), MAXIMUM_BACKOFF].min)
+      retry
+    end
+
+    def fail_prepared_hosts(diagnostic:, error:)
       prepared_hosts.each do |host|
-        result_settler.failure!(host, diagnostic: nil, error: error.message)
+        next if result_settler.respond_to?(:settled?) && result_settler.settled?(host)
+
+        result_settler.failure!(host, diagnostic: diagnostic, error: error)
       end
+    end
+
+    def execution_value(attribute)
+      return execution_record.public_send(attribute) if execution_record.respond_to?(attribute)
+
+      execution_record.attributes[attribute]
     end
 
     def normalize_status(status)
@@ -202,11 +266,12 @@ module ForemanAnsibleAap
     end
 
     def cancellation_requested?
-      execution_record.cancellation_requested_at.present?
+      execution_value(:cancellation_requested_at).present?
     end
 
     def scm_ref
-      @scm_ref ||= "foreman/#{configuration.instance_id}/job-invocation-#{job_invocation.id}"
+      @scm_ref ||= execution_value(:scm_ref) ||
+                   "foreman/#{configuration.instance_id}/job-invocation-#{job_invocation.id}"
     end
   end
 end

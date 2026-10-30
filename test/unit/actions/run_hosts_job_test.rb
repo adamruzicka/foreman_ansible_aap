@@ -109,5 +109,28 @@ module ForemanAnsibleAap
 
       action.cancel!
     end
+
+    test 'exposes incomplete AAP output separately from host execution results' do
+      aggregate_result = stub(
+        job_id: 91,
+        job_url: 'https://aap.example.test/jobs/91/',
+        commit_sha: '7f83b165',
+        scm_ref: 'foreman/prod/job-invocation-42',
+        output_incomplete: true,
+        output_failure_diagnostic: 'AAP output page 2 was unavailable'
+      )
+      action_output = mock('aggregate action output')
+      action.stubs(:output).returns(action_output)
+      action_output.expects(:update).with(
+        aap_job_id: 91,
+        aap_job_url: 'https://aap.example.test/jobs/91/',
+        aap_commit_sha: '7f83b165',
+        aap_scm_ref: 'foreman/prod/job-invocation-42',
+        aap_output_incomplete: true,
+        aap_output_failure_diagnostic: 'AAP output page 2 was unavailable'
+      )
+
+      action.record_output(aggregate_result)
+    end
   end
 end

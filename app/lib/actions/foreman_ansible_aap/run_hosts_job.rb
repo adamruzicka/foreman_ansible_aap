@@ -59,7 +59,9 @@ module Actions
           aap_job_id: result.job_id,
           aap_job_url: result.job_url,
           aap_commit_sha: result.commit_sha,
-          aap_scm_ref: result.scm_ref
+          aap_scm_ref: result.scm_ref,
+          aap_output_incomplete: result.output_incomplete,
+          aap_output_failure_diagnostic: result.output_failure_diagnostic
         )
       end
 
