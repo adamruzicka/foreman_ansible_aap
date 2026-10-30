@@ -2,6 +2,12 @@
 
 require 'foreman_ansible'
 require 'foreman_remote_execution'
+require 'foreman_ansible_aap/configuration'
+require 'foreman_ansible_aap/aggregate_execution'
+require 'foreman_ansible_aap/aap_client'
+require 'foreman_ansible_aap/git_publisher'
+require 'foreman_ansible_aap/playbook_renderer'
+require 'foreman_ansible_aap/result_settler'
 require 'foreman_ansible_aap/execution_driver'
 require 'foreman_ansible_aap/engine'
 
