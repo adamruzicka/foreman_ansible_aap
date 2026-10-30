@@ -96,5 +96,18 @@ module ForemanAnsibleAap
 
       assert_equal [raw_output], host_action.live_output
     end
+
+    test 'records whole-job cancellation without forwarding it to lightweight host plans' do
+      execution_record = mock('execution record')
+      execution_record.stubs(:cancellation_requested_at).returns(nil)
+      execution_record.expects(:update!).with do |attributes|
+        attributes.keys == [:cancellation_requested_at] && attributes[:cancellation_requested_at].present?
+      end
+      action.stubs(:execution_record).returns(execution_record)
+      action.stubs(:output).returns({})
+      action.expects(:sub_plans).never
+
+      action.cancel!
+    end
   end
 end

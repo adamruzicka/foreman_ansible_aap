@@ -6,6 +6,10 @@ class AggregateExecutionTest < ActiveSupport::TestCase
   Host = Struct.new(:name)
 
   class Record
+    OPTIONAL_ATTRIBUTES = %i[
+      aap_job_id aap_job_url aap_status cancellation_requested_at cancellation_sent_at
+      commit_sha scm_ref
+    ].freeze
     attr_reader :attributes
 
     def initialize
@@ -14,6 +18,22 @@ class AggregateExecutionTest < ActiveSupport::TestCase
 
     def update!(attributes)
       @attributes.merge!(attributes)
+    end
+
+    def reload
+      self
+    end
+
+    def method_missing(name, *arguments)
+      return attributes[name] if arguments.empty? && attributes.key?(name)
+      return 'pending' if name == :workflow_state && arguments.empty?
+      return nil if arguments.empty? && OPTIONAL_ATTRIBUTES.include?(name)
+
+      super
+    end
+
+    def respond_to_missing?(name, include_private = false)
+      name == :workflow_state || OPTIONAL_ATTRIBUTES.include?(name) || attributes.key?(name) || super
     end
   end
 
@@ -52,7 +72,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
   end
 
   class AapClient
-    attr_reader :preflights, :launches, :status_requests, :summary_requests
+    attr_reader :preflights, :launches, :status_requests, :summary_requests, :cancellations
 
     def initialize(execution_record, trace = [], statuses: %w[queued waiting running successful], summaries: nil)
       @execution_record = execution_record
@@ -61,6 +81,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       @launches = []
       @status_requests = []
       @summary_requests = []
+      @cancellations = []
       @statuses = statuses
       @summaries = summaries || [
         { host_name: 'node-1.example.test', successful: true },
@@ -90,6 +111,11 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       @summaries
     end
 
+    def cancel!(job_id)
+      @cancellations << job_id
+      true
+    end
+
     private
 
     def assert_job_was_persisted
@@ -112,11 +138,12 @@ class AggregateExecutionTest < ActiveSupport::TestCase
   end
 
   class ResultSettler
-    attr_reader :successful_hosts, :failed_hosts
+    attr_reader :successful_hosts, :failed_hosts, :cancelled_hosts
 
     def initialize
       @successful_hosts = []
       @failed_hosts = []
+      @cancelled_hosts = []
     end
 
     def success!(host)
@@ -126,6 +153,145 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     def failure!(host, diagnostic:, error: diagnostic)
       @failed_hosts << [host, diagnostic]
     end
+
+    def cancelled!(host)
+      @cancelled_hosts << host
+    end
+  end
+
+  test 'cancellation before publication skips every external operation and cancels prepared hosts' do
+    execution_record = Record.new
+    execution_record.update!(cancellation_requested_at: Time.zone.now)
+    hosts = [Host.new('node-1.example.test'), Host.new('node-2.example.test')]
+    aap_client = AapClient.new(execution_record)
+    settler = ResultSettler.new
+    renderer = Renderer.new
+    publisher = Publisher.new
+    execution = build_execution(
+      execution_record,
+      hosts,
+      aap_client,
+      settler,
+      renderer: renderer,
+      publisher: publisher
+    )
+
+    result = execution.call
+
+    assert_equal 'cancelled', result.state
+    assert_empty aap_client.preflights
+    assert_empty renderer.invocations
+    assert_empty publisher.publications
+    assert_empty aap_client.launches
+    assert_equal hosts, settler.cancelled_hosts
+  end
+
+  test 'cancellation after publication preserves the immutable ref and prevents launch' do
+    execution_record = Record.new
+    hosts = [Host.new('node-1.example.test')]
+    aap_client = AapClient.new(execution_record)
+    settler = ResultSettler.new
+    publisher = Publisher.new
+    execution = build_execution(execution_record, hosts, aap_client, settler, publisher: publisher)
+
+    refute execution.advance.complete?
+    refute execution.advance.complete?
+    published_coordinates = execution_record.attributes.slice(:repository_url, :scm_ref, :commit_sha)
+    execution_record.update!(cancellation_requested_at: Time.zone.now)
+
+    result = execution.advance
+
+    assert result.complete?
+    assert_equal 'cancelled', result.result.state
+    assert_equal 1, publisher.publications.size
+    assert_equal published_coordinates, execution_record.attributes.slice(:repository_url, :scm_ref, :commit_sha)
+    assert_empty aap_client.launches
+    assert_equal hosts, settler.cancelled_hosts
+  end
+
+  test 'accepted cancellation polls through queued and running and preserves completed host outcomes' do
+    execution_record = Record.new
+    hosts = [
+      Host.new('successful.example.test'),
+      Host.new('failed.example.test'),
+      Host.new('unfinished.example.test'),
+    ]
+    trace = []
+    aap_client = AapClient.new(
+      execution_record,
+      trace,
+      statuses: %w[queued running canceled],
+      summaries: [
+        { host_name: hosts[0].name, successful: true },
+        { host_name: hosts[1].name, successful: false },
+      ]
+    )
+    settler = ResultSettler.new
+    event_ingestor = EventIngestor.new(trace)
+    execution = build_execution(
+      execution_record,
+      hosts,
+      aap_client,
+      settler,
+      event_ingestor: event_ingestor
+    )
+    3.times { refute execution.advance.complete? }
+    execution_record.update!(cancellation_requested_at: Time.zone.now)
+
+    refute execution.advance.complete?
+    assert_equal [91], aap_client.cancellations
+    refute execution.advance.complete?
+    assert_equal [91], aap_client.cancellations
+    result = execution.advance
+
+    assert result.complete?
+    assert_equal 'cancelled', result.result.state
+    assert_equal [91, 91, 91], aap_client.status_requests
+    assert_equal [91, 91, 91], event_ingestor.jobs
+    assert_equal [hosts[0]], settler.successful_hosts
+    assert_equal [[hosts[1], 'AAP reported a failed result for failed.example.test']], settler.failed_hosts
+    assert_equal [hosts[2]], settler.cancelled_hosts
+  end
+
+  test 'cancellation requested while AAP is running sends one request and waits for canceled' do
+    execution_record = Record.new
+    host = Host.new('node-1.example.test')
+    aap_client = AapClient.new(
+      execution_record,
+      statuses: %w[running canceled],
+      summaries: []
+    )
+    settler = ResultSettler.new
+    execution = build_execution(execution_record, [host], aap_client, settler)
+    3.times { refute execution.advance.complete? }
+    execution_record.update!(cancellation_requested_at: Time.zone.now)
+
+    refute execution.advance.complete?
+    assert_equal [91], aap_client.cancellations
+    result = execution.advance
+
+    assert result.complete?
+    assert_equal 'cancelled', result.result.state
+    assert_equal [91], aap_client.cancellations
+    assert_equal [host], settler.cancelled_hosts
+  end
+
+  test 'cancellation after AAP is already terminal settles normally without a cancel request' do
+    execution_record = Record.new
+    host = Host.new('node-1.example.test')
+    aap_client = AapClient.new(execution_record, statuses: ['successful'])
+    settler = ResultSettler.new
+    execution = build_execution(execution_record, [host], aap_client, settler)
+    3.times { refute execution.advance.complete? }
+    execution_record.update!(cancellation_requested_at: Time.zone.now)
+
+    result = execution.advance
+
+    assert result.complete?
+    assert_equal 'successful', result.result.state
+    assert_empty aap_client.cancellations
+    assert_equal [host], settler.successful_hosts
+    assert_empty settler.cancelled_hosts
   end
 
   test 'streams active output and performs a final catch-up before settling prepared hosts' do
@@ -207,11 +373,13 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     assert_equal [91], aap_client.summary_requests
     assert_equal hosts, settler.successful_hosts
     assert_equal({
+      workflow_state: 'reconciled',
       repository_url: 'https://git.example.test/generated.git',
       scm_ref: 'foreman/foreman-prod/job-invocation-42',
       commit_sha: '7f83b1657ff1fc53b92dc18148a1d65dfa13514d',
       aap_job_id: 91,
       aap_job_url: 'https://aap.example.test/execution/jobs/playbook/91/',
+      aap_status: 'successful',
     }, execution_record.attributes)
     assert_equal 91, result.job_id
   end
@@ -381,7 +549,15 @@ class AggregateExecutionTest < ActiveSupport::TestCase
 
   private
 
-  def build_execution(execution_record, hosts, aap_client, settler, renderer: Renderer.new)
+  def build_execution(
+    execution_record,
+    hosts,
+    aap_client,
+    settler,
+    renderer: Renderer.new,
+    publisher: Publisher.new,
+    event_ingestor: EventIngestor.new([])
+  )
     configuration = ForemanAnsibleAap::Configuration.new(
       controller_url: 'https://aap.example.test',
       service_token: 'controller-secret',
@@ -404,9 +580,9 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       configuration: configuration,
       dependencies: {
         renderer: renderer,
-        publisher: Publisher.new,
+        publisher: publisher,
         aap_client: aap_client,
-        event_ingestor: EventIngestor.new([]),
+        event_ingestor: event_ingestor,
         result_settler: settler,
       }
     )

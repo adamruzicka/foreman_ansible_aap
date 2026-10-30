@@ -34,4 +34,24 @@ class ResultSettlerTest < ActiveSupport::TestCase
     diagnostic = failed.template_invocation_events.find_by(event_type: 'stdout')
     assert_equal 'AAP reported this host as unreachable', diagnostic.event
   end
+
+  test 'cancellation is a durable host outcome with a cancelled exit event' do
+    invocation = FactoryBot.create(:job_invocation, :with_template)
+    template_invocation = invocation.pattern_template_invocations.first.deep_clone
+    host = FactoryBot.create(:host)
+    template_invocation.update!(host: host)
+    execution = ForemanAnsibleAap::Execution.create!(job_invocation: invocation)
+    record = ForemanAnsibleAap::HostExecution.create!(
+      execution: execution,
+      host: host,
+      template_invocation: template_invocation,
+      preparation_state: 'prepared'
+    )
+
+    ForemanAnsibleAap::ResultSettler.new([record]).cancelled!(host)
+
+    assert_equal 'cancelled', record.reload.result_state
+    assert_equal 'AAP job cancellation left this host unfinished', record.result_error
+    assert_equal '1', template_invocation.template_invocation_events.find_by(event_type: 'exit').event
+  end
 end

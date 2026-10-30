@@ -150,4 +150,15 @@ class AapClientTest < ActiveSupport::TestCase
       '/api/controller/v2/jobs/91/job_events/?id__gt=40&page=2',
     ], transport.gets
   end
+
+  test 'cancels one persisted AAP job through its job endpoint' do
+    transport = Transport.new
+    client = ForemanAnsibleAap::AapClient.new(
+      controller_url: 'https://unused.example.test', token: 'secret', ca_bundle: nil, transport: transport
+    )
+
+    assert client.cancel!(91)
+
+    assert_equal [['jobs/91/cancel/', {}]], transport.posts
+  end
 end

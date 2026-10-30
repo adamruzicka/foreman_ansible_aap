@@ -16,6 +16,16 @@ module ForemanAnsibleAap
       settle(record, exit_status: '1', result_state: 'failed', diagnostic: diagnostic, error: error)
     end
 
+    def cancelled!(host)
+      record = host_executions.fetch(host.name)
+      settle(
+        record,
+        exit_status: '1',
+        result_state: 'cancelled',
+        error: 'AAP job cancellation left this host unfinished'
+      )
+    end
+
     private
 
     attr_reader :host_executions

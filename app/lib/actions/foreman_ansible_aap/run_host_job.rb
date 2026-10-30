@@ -82,6 +82,8 @@ module Actions
           nil
         when 'failed'
           raise PreparationError, record.result_error
+        when 'cancelled'
+          error! ::ForemanTasks::Task::TaskCancelledException.new(_('Task cancelled'))
         else
           suspend
         end

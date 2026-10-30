@@ -53,6 +53,11 @@ module ForemanAnsibleAap
       transport.get("jobs/#{job_id}/").fetch('status')
     end
 
+    def cancel!(job_id)
+      transport.post("jobs/#{job_id}/cancel/", {})
+      true
+    end
+
     def job_events(job_id, after_id: nil)
       path = "jobs/#{job_id}/job_events/?order_by=id&page_size=200"
       path = "#{path}&id__gt=#{after_id}" if after_id
