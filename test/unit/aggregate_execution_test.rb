@@ -54,8 +54,9 @@ class AggregateExecutionTest < ActiveSupport::TestCase
   class AapClient
     attr_reader :preflights, :launches, :status_requests, :summary_requests
 
-    def initialize(execution_record, statuses: %w[queued waiting running successful], summaries: nil)
+    def initialize(execution_record, trace = [], statuses: %w[queued waiting running successful], summaries: nil)
       @execution_record = execution_record
+      @trace = trace
       @preflights = []
       @launches = []
       @status_requests = []
@@ -79,7 +80,9 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     def job_status(job_id)
       assert_job_was_persisted
       @status_requests << job_id
-      @statuses.shift
+      status = @statuses.shift
+      @trace << "status_#{status}".to_sym
+      status
     end
 
     def host_summaries(job_id)
@@ -91,6 +94,20 @@ class AggregateExecutionTest < ActiveSupport::TestCase
 
     def assert_job_was_persisted
       raise 'polled before persisting the AAP job' unless @execution_record.attributes[:aap_job_id] == 91
+    end
+  end
+
+  class EventIngestor
+    attr_reader :jobs
+
+    def initialize(trace)
+      @trace = trace
+      @jobs = []
+    end
+
+    def ingest(job_id)
+      @jobs << job_id
+      @trace << :events
     end
   end
 
@@ -111,7 +128,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     end
   end
 
-  test 'renders, publishes, and launches once before settling all prepared hosts' do
+  test 'streams active output and performs a final catch-up before settling prepared hosts' do
     invocation = Invocation.new(42)
     execution_record = Record.new
     hosts = [Host.new('node-1.example.test'), Host.new('node-2.example.test')]
@@ -131,7 +148,9 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     )
     renderer = Renderer.new
     publisher = Publisher.new
-    aap_client = AapClient.new(execution_record)
+    trace = []
+    aap_client = AapClient.new(execution_record, trace)
+    event_ingestor = EventIngestor.new(trace)
     settler = ResultSettler.new
 
     result = ForemanAnsibleAap::AggregateExecution.new(
@@ -143,6 +162,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
         renderer: renderer,
         publisher: publisher,
         aap_client: aap_client,
+        event_ingestor: event_ingestor,
         result_settler: settler,
       }
     ).call
@@ -177,6 +197,13 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       },
     }, aap_client.launches.first)
     assert_equal [91, 91, 91, 91], aap_client.status_requests
+    assert_equal [91, 91, 91, 91], event_ingestor.jobs
+    assert_equal %i[
+      status_queued events
+      status_waiting events
+      status_running events
+      status_successful events
+    ], trace
     assert_equal [91], aap_client.summary_requests
     assert_equal hosts, settler.successful_hosts
     assert_equal({
@@ -339,6 +366,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
         renderer: renderer,
         publisher: Publisher.new,
         aap_client: aap_client,
+        event_ingestor: EventIngestor.new([]),
         result_settler: settler,
       }
     )

@@ -27,14 +27,7 @@ module Actions
       def finalize
         invocation = job_invocation
         template_invocations = prepared_template_invocations(invocation)
-        execution = ::ForemanAnsibleAap::AggregateExecution.new(
-          job_invocation: invocation,
-          execution_record: ::ForemanAnsibleAap::Execution.find_or_create_by!(job_invocation: invocation),
-          prepared_hosts: template_invocations.map(&:host),
-          configuration: configuration,
-          dependencies: execution_dependencies(template_invocations)
-        )
-        result = execution.call
+        result = aggregate_execution(invocation, template_invocations).call
         record_output(result)
       end
 
@@ -73,6 +66,17 @@ module Actions
 
       private
 
+      def aggregate_execution(invocation, template_invocations)
+        execution_record = ::ForemanAnsibleAap::Execution.find_or_create_by!(job_invocation: invocation)
+        ::ForemanAnsibleAap::AggregateExecution.new(
+          job_invocation: invocation,
+          execution_record: execution_record,
+          prepared_hosts: template_invocations.map(&:host),
+          configuration: configuration,
+          dependencies: execution_dependencies(template_invocations, execution_record)
+        )
+      end
+
       def prepared_template_invocations(invocation)
         invocation.template_invocations
                   .where.not(run_host_job_task_id: nil)
@@ -92,13 +96,22 @@ module Actions
         )
       end
 
-      def execution_dependencies(template_invocations)
+      def execution_dependencies(template_invocations, execution_record)
         {
           renderer: ::ForemanAnsibleAap::PlaybookRenderer.new,
           publisher: ::ForemanAnsibleAap::GitPublisher.new,
           aap_client: aap_client,
+          event_ingestor: event_ingestor(execution_record, template_invocations),
           result_settler: ::ForemanAnsibleAap::ResultSettler.new(template_invocations),
         }
+      end
+
+      def event_ingestor(execution_record, template_invocations)
+        ::ForemanAnsibleAap::EventIngestor.new(
+          execution_record: execution_record,
+          template_invocations: template_invocations,
+          aap_client: aap_client
+        )
       end
     end
   end
