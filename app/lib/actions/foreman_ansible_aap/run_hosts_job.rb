@@ -3,6 +3,8 @@
 module Actions
   module ForemanAnsibleAap
     class RunHostsJob < Actions::ActionWithSubPlans
+      include Actions::RecurringAction
+
       middleware.use Actions::Middleware::BindJobInvocation
       middleware.do_not_use Dynflow::Middleware::Common::Transaction
 
