@@ -28,11 +28,11 @@ module ForemanAnsibleAap
         run(commit_environment, 'git', '-c', 'user.name=Foreman AAP', '-c', 'user.email=foreman-aap@localhost',
           'commit', '-m', "Foreman Job Invocation #{attributes.fetch(:ref)}", chdir: repository)
         commit_sha = run(environment, 'git', 'rev-parse', 'HEAD', chdir: repository).strip
-        expected_tree = run(environment, 'git', 'rev-parse', 'HEAD^{tree}', chdir: repository).strip
         existing_sha = remote_ref_sha(environment, repository, attributes.fetch(:ref))
         if existing_sha
-          return matching_existing_sha!(
-            environment, repository, attributes.fetch(:ref), existing_sha, expected_tree
+          return matching_existing_content!(
+            environment, repository, attributes.fetch(:ref), existing_sha,
+            attributes.fetch(:path), attributes.fetch(:content)
           )
         end
 
@@ -41,11 +41,14 @@ module ForemanAnsibleAap
           commit_sha
         rescue PublicationError
           # A concurrent publisher may have won the create-only race. Re-read the
-          # immutable ref and accept it only when it points at the same tree.
+          # immutable ref and accept it only when it contains the same artifact.
           existing_sha = remote_ref_sha(environment, repository, attributes.fetch(:ref))
           raise unless existing_sha
 
-          matching_existing_sha!(environment, repository, attributes.fetch(:ref), existing_sha, expected_tree)
+          matching_existing_content!(
+            environment, repository, attributes.fetch(:ref), existing_sha,
+            attributes.fetch(:path), attributes.fetch(:content)
+          )
         end
       end
     end
@@ -100,11 +103,19 @@ module ForemanAnsibleAap
       output.split.first
     end
 
-    def matching_existing_sha!(environment, repository, ref, existing_sha, expected_tree)
+    def matching_existing_content!(environment, repository, ref, existing_sha, path, expected_content)
       run(environment, 'git', 'fetch', 'origin', "refs/heads/#{ref}", chdir: repository)
-      existing_tree = run(environment, 'git', 'rev-parse', 'FETCH_HEAD^{tree}', chdir: repository).strip
-      return existing_sha if existing_tree == expected_tree
+      existing_content = begin
+        run(environment, 'git', 'show', "FETCH_HEAD:#{path}", chdir: repository)
+      rescue PublicationError
+        raise_conflicting_ref!(ref)
+      end
+      return existing_sha if existing_content == expected_content
 
+      raise_conflicting_ref!(ref)
+    end
+
+    def raise_conflicting_ref!(ref)
       raise PublicationError, "Generated Git ref #{ref} already exists with different content"
     end
 

@@ -8,16 +8,16 @@ class GitPublisherTest < ActiveSupport::TestCase
   setup do
     @directory = Dir.mktmpdir('foreman-ansible-aap-publisher-test')
     @remote = File.join(@directory, 'generated.git')
-    source = File.join(@directory, 'source')
+    @source = File.join(@directory, 'source')
 
     git('init', '--bare', @remote)
-    git('init', '-b', 'main', source)
-    File.write(File.join(source, 'README.md'), "generated playbooks\n")
-    git('-C', source, 'add', 'README.md')
-    git('-C', source, '-c', 'user.name=Test', '-c', 'user.email=test@example.test',
+    git('init', '-b', 'main', @source)
+    File.write(File.join(@source, 'README.md'), "generated playbooks\n")
+    git('-C', @source, 'add', 'README.md')
+    git('-C', @source, '-c', 'user.name=Test', '-c', 'user.email=test@example.test',
       'commit', '-m', 'base')
-    git('-C', source, 'remote', 'add', 'origin', @remote)
-    git('-C', source, 'push', 'origin', 'main')
+    git('-C', @source, 'remote', 'add', 'origin', @remote)
+    git('-C', @source, 'push', 'origin', 'main')
   end
 
   teardown do
@@ -29,6 +29,7 @@ class GitPublisherTest < ActiveSupport::TestCase
     attributes = publication_attributes("---\n- hosts: all\n")
 
     first_sha = publisher.publish(attributes)
+    advance_base_ref
     matching_sha = publisher.publish(attributes)
 
     assert_equal first_sha, matching_sha
@@ -89,6 +90,14 @@ class GitPublisherTest < ActiveSupport::TestCase
 
   def remote_ref_sha
     git('--git-dir', @remote, 'rev-parse', 'refs/heads/foreman/production/job-invocation-42').strip
+  end
+
+  def advance_base_ref
+    File.write(File.join(@source, 'README.md'), "generated playbooks, retained externally\n")
+    git('-C', @source, 'add', 'README.md')
+    git('-C', @source, '-c', 'user.name=Test', '-c', 'user.email=test@example.test',
+      'commit', '-m', 'advance base')
+    git('-C', @source, 'push', 'origin', 'main')
   end
 
   def git(*arguments)
