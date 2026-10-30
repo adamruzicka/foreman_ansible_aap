@@ -55,6 +55,17 @@ class JobInvocationExtensionsTest < ActiveSupport::TestCase
     assert_includes @invocation.errors[:base].join(' '), 'Effective user'
   end
 
+  test 'AAP invocations tolerate the template timeout but reject an invocation override' do
+    template = @invocation.pattern_template_invocations.first.template
+    template.update!(execution_timeout_interval: 30)
+    @invocation.execution_timeout_interval = 30
+    assert @invocation.valid?, @invocation.errors.full_messages.join(', ')
+
+    @invocation.execution_timeout_interval = 60
+    assert_not @invocation.valid?
+    assert_includes @invocation.errors[:base].join(' '), 'Execution timeout'
+  end
+
   test 'AAP invocations reject proxy-only Ansible provider inputs' do
     @invocation.pattern_template_invocations.first.provider_input_values.build(
       name: 'tags', value: 'production'

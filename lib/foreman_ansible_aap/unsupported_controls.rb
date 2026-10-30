@@ -48,13 +48,14 @@ module ForemanAnsibleAap
     end
 
     def template_control_messages
-      template_invocations.flat_map do |invocation|
+      messages = template_invocations.flat_map do |invocation|
         [
           smart_proxy_message(invocation),
           effective_user_message(invocation),
           provider_inputs_message(invocation),
         ].compact
-      end.uniq
+      end
+      (messages << execution_timeout_message).compact.uniq
     end
 
     def template_invocations
@@ -82,6 +83,16 @@ module ForemanAnsibleAap
       return if invocation.provider_input_values.none? { |value| value.value.present? }
 
       _('Ansible proxy provider options are not supported by the AAP execution driver')
+    end
+
+    def execution_timeout_message
+      return unless job_invocation.respond_to?(:execution_timeout_interval)
+
+      timeout = job_invocation.execution_timeout_interval
+      inherited = template_invocations.filter_map { |invocation| invocation.template.execution_timeout_interval }
+      return if timeout.blank? || inherited.include?(timeout)
+
+      _('Execution timeout overrides are not supported because AAP owns the execution deadline')
     end
   end
 end

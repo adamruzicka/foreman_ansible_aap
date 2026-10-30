@@ -11,6 +11,8 @@ module ForemanAnsibleAap
         %i[ssh effective_user_password] => N_('Effective user password is not supported by the AAP execution driver'),
         %i[concurrency_control concurrency_level] =>
           N_('Concurrency / proxy batching is not supported by the AAP execution driver'),
+        %i[execution_timeout_interval] =>
+          N_('Execution timeout is owned by AAP and cannot be overridden by Foreman'),
       }.freeze
       FILTERED_CANCELLATION_MESSAGE = N_(
         'Host-filtered cancellation is not supported for a single aggregate AAP job; ' \

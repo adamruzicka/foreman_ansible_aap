@@ -97,11 +97,13 @@ module Api
             targeting_type: 'static_query',
             search_query: 'name ~ example.test',
             ssh_user: 'proxy-managed-user',
+            execution_timeout_interval: 30,
           },
         }
 
         assert_response :unprocessable_entity
         assert_includes response.parsed_body.dig('error', 'message'), 'SSH user'
+        assert_includes response.parsed_body.dig('error', 'message'), 'Execution timeout'
       ensure
         Setting[:ansible_execution_driver] = old_driver
       end
