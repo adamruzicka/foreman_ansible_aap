@@ -91,7 +91,7 @@ class JobInvocationExtensionsTest < ActiveSupport::TestCase
     @invocation.pattern_template_invocations.first.smart_proxy = FactoryBot.create(:smart_proxy)
 
     assert_not @invocation.valid?
-    assert_includes @invocation.errors[:base].join(' '), 'Smart proxy selection'
+    assert_includes @invocation.errors[:base].join(' '), 'selection is not supported by the AAP execution driver'
   end
 
   test 'AAP invocations reject an explicit effective user override but tolerate the model default' do

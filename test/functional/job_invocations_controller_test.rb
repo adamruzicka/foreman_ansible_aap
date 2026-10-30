@@ -23,6 +23,7 @@ class ForemanAnsibleAapJobInvocationsControllerTest < ActionController::TestCase
       output_incomplete: true,
       output_failure_diagnostic: 'AAP output page 2 was unavailable'
     )
+    ForemanTasks::Task.any_instance.stubs(:cancellable?).returns(false)
 
     get :show, params: { id: invocation.id }, session: set_session_user
 
