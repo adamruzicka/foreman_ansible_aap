@@ -92,11 +92,76 @@ module ForemanAnsibleAap
       assert_equal %w[error error], (hosts.map { |host| invocation.sub_task_for_host(host).result })
     end
 
+    test 'failed-host rerun creates an independently auditable AAP invocation for every failure kind' do
+      original_driver = Setting[:ansible_execution_driver]
+      Setting[:ansible_execution_driver] = 'aap'
+      preparation_host = FactoryBot.create(:host, :with_infrastructure_facet)
+      execution_host = FactoryBot.create(:host)
+      unreachable_host = FactoryBot.create(:host)
+      missing_host = FactoryBot.create(:host)
+      hosts = [preparation_host, execution_host, unreachable_host, missing_host]
+      setup_user('view', 'hosts')
+      setup_user('view', 'job_templates')
+      setup_user('create', 'template_invocations')
+      invocation = build_invocation(hosts)
+      publications = []
+      launches = []
+      rendered_invocations = []
+      stub_rerun_external_work(
+        hosts: hosts,
+        execution_host: execution_host,
+        unreachable_host: unreachable_host,
+        publications: publications,
+        launches: launches,
+        rendered_invocations: rendered_invocations
+      )
+
+      trigger(invocation)
+
+      assert_equal hosts.map(&:id).sort, invocation.reload.failed_host_ids.sort
+      original_execution = Execution.find_by!(job_invocation: invocation)
+      original_coordinates = original_execution.attributes.slice(
+        'repository_url', 'scm_ref', 'commit_sha', 'aap_job_id', 'aap_job_url'
+      )
+
+      composer = nil
+      rerun_invocation = nil
+      as_admin do
+        composer = JobInvocationComposer.from_job_invocation(invocation, failed_only: true)
+        rerun_invocation = composer.job_invocation
+        rerun_invocation.pattern_template_invocations.first.input_values.first.value = 'nginx'
+        wait_for_trigger(composer.trigger!)
+      end
+
+      rerun_execution = Execution.find_by!(job_invocation: rerun_invocation)
+      assert_not_equal invocation.id, rerun_invocation.id
+      assert_equal 'aap', rerun_invocation.ansible_execution_driver
+      assert_equal hosts.map(&:id).sort, rerun_invocation.targeting.host_ids.sort
+      assert_equal hosts.map(&:name).join(','), launches.second.fetch(:limit)
+      assert_equal [invocation.id, rerun_invocation.id], rendered_invocations.map(&:first)
+      assert_equal %w[httpd nginx], rendered_invocations.map(&:last)
+      assert_equal 2, publications.size
+      assert_equal "foreman/foreman-test/job-invocation-#{invocation.id}", publications.first.fetch(:ref)
+      assert_equal "foreman/foreman-test/job-invocation-#{rerun_invocation.id}", publications.second.fetch(:ref)
+      assert_not_equal original_execution.scm_ref, rerun_execution.scm_ref
+      assert_not_equal original_execution.commit_sha, rerun_execution.commit_sha
+      assert_equal original_coordinates, original_execution.reload.attributes.slice(*original_coordinates.keys)
+      assert_equal %w[success success success success],
+        rerun_invocation.reload.template_invocation_tasks.order(:id).pluck(:result)
+    ensure
+      Setting[:ansible_execution_driver] = original_driver
+    end
+
     private
 
     def trigger(invocation)
       triggered = ForemanTasks.trigger(Actions::ForemanAnsibleAap::RunHostsJob, invocation)
+      wait_for_trigger(triggered)
+    end
+
+    def wait_for_trigger(triggered)
       raise triggered.error if triggered.respond_to?(:error)
+      return triggered if triggered.is_a?(ForemanTasks::Task)
 
       triggered.finished.wait(20)
       ForemanTasks::Task.find_by!(external_id: triggered.id)
@@ -122,6 +187,7 @@ module ForemanAnsibleAap
         template.save!
         template.then do
           FactoryBot.build(:job_invocation, targeting: targeting).tap do |invocation|
+            invocation.job_category = template.job_category
             invocation.description = 'AAP preparation integration'
             pattern = FactoryBot.build(
               :template_invocation,
@@ -155,6 +221,44 @@ module ForemanAnsibleAap
         hosts.map { |host| { host_name: host.name, successful: true } }
       )
       launches
+    end
+
+    def stub_rerun_external_work(hosts:, execution_host:, unreachable_host:, **captured)
+      publications = captured.fetch(:publications)
+      launches = captured.fetch(:launches)
+      rendered_invocations = captured.fetch(:rendered_invocations)
+      Configuration.stubs(:from_settings).returns(configuration)
+      PlaybookRenderer.any_instance.expects(:render).twice.with do |job_invocation|
+        rendered_invocations << [
+          job_invocation.id,
+          job_invocation.pattern_template_invocations.first.input_values.first.value,
+        ]
+        true
+      end.returns("---\n- hosts: all\n")
+      GitPublisher.any_instance.expects(:publish).twice.with do |attributes|
+        publications << attributes
+        true
+      end.returns('a' * 40, 'b' * 40)
+      AapClient.any_instance.expects(:preflight!).twice
+      AapClient.any_instance.expects(:launch).twice.with do |attributes|
+        launches << attributes
+        true
+      end.returns(
+        { id: 101, url: 'https://aap.example.test/jobs/101/' },
+        { id: 102, url: 'https://aap.example.test/jobs/102/' }
+      )
+      AapClient.any_instance.expects(:job_status).with(101).once.returns('successful')
+      AapClient.any_instance.expects(:job_status).with(102).once.returns('successful')
+      AapClient.any_instance.expects(:job_events).with(101, after_id: nil).once.returns([])
+      AapClient.any_instance.expects(:job_events).with(102, after_id: nil).once.returns([])
+      failed_summaries = [
+        { host_name: execution_host.name, successful: false },
+        { host_name: unreachable_host.name, successful: false, unreachable: true },
+      ]
+      AapClient.any_instance.expects(:host_summaries).with(101).once.returns(failed_summaries)
+      AapClient.any_instance.expects(:host_summaries).with(102).once.returns(
+        hosts.map { |host| { host_name: host.name, successful: true } }
+      )
     end
 
     def configuration
