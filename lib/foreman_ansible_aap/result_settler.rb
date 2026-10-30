@@ -2,29 +2,30 @@
 
 module ForemanAnsibleAap
   class ResultSettler
-    def initialize(template_invocations)
-      @template_invocations = template_invocations.index_by { |invocation| invocation.host.name }
+    def initialize(host_executions)
+      @host_executions = host_executions.index_by { |record| record.host.name }
     end
 
     def success!(host)
-      invocation = template_invocations.fetch(host.name)
-      settle(invocation, exit_status: '0', task_result: 'success')
+      record = host_executions.fetch(host.name)
+      settle(record, exit_status: '0', result_state: 'successful')
     end
 
-    def failure!(host, diagnostic:)
-      invocation = template_invocations.fetch(host.name)
-      settle(invocation, exit_status: '1', task_result: 'error', diagnostic: diagnostic)
+    def failure!(host, diagnostic:, error: diagnostic)
+      record = host_executions.fetch(host.name)
+      settle(record, exit_status: '1', result_state: 'failed', diagnostic: diagnostic, error: error)
     end
 
     private
 
-    attr_reader :template_invocations
+    attr_reader :host_executions
 
-    def settle(invocation, exit_status:, task_result:, diagnostic: nil)
+    def settle(record, exit_status:, result_state:, diagnostic: nil, error: nil)
       TemplateInvocationEvent.transaction do
+        invocation = record.template_invocation
         create_event(invocation, 'aap-host-summary-diagnostic', diagnostic, 'stdout') if diagnostic
         create_event(invocation, 'aap-host-summary-exit', exit_status, 'exit')
-        invocation.run_host_job_task.update!(result: task_result)
+        record.update!(result_state: result_state, result_error: error)
       end
     end
 

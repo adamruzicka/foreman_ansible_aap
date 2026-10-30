@@ -21,12 +21,14 @@ module ForemanAnsibleAap
     end
 
     def call
+      return Result.new if prepared_hosts.empty?
+
       remote_job, commit_sha = start_remote_job
       finish_remote_job(remote_job)
 
       result(remote_job, commit_sha)
-    rescue StandardError
-      fail_prepared_hosts unless @host_outcomes_settled
+    rescue StandardError => e
+      fail_prepared_hosts(e) unless @host_outcomes_settled
       raise
     end
 
@@ -131,9 +133,9 @@ module ForemanAnsibleAap
       failed_hosts
     end
 
-    def fail_prepared_hosts
+    def fail_prepared_hosts(error)
       prepared_hosts.each do |host|
-        result_settler.failure!(host, diagnostic: nil)
+        result_settler.failure!(host, diagnostic: nil, error: error.message)
       end
     end
 
