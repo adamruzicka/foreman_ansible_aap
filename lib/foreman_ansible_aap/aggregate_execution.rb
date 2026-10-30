@@ -16,6 +16,7 @@ module ForemanAnsibleAap
       @renderer = dependencies.fetch(:renderer)
       @publisher = dependencies.fetch(:publisher)
       @aap_client = dependencies.fetch(:aap_client)
+      @event_ingestor = dependencies.fetch(:event_ingestor)
       @result_settler = dependencies.fetch(:result_settler)
     end
 
@@ -44,7 +45,7 @@ module ForemanAnsibleAap
     end
 
     attr_reader :job_invocation, :execution_record, :prepared_hosts, :configuration, :renderer,
-      :publisher, :aap_client, :result_settler
+      :publisher, :aap_client, :event_ingestor, :result_settler
 
     def preflight!
       aap_client.preflight!(
@@ -98,6 +99,7 @@ module ForemanAnsibleAap
     def wait_for_success(job_id)
       loop do
         status = normalize_status(aap_client.job_status(job_id))
+        event_ingestor.ingest(job_id)
         next if ACTIVE_STATUSES.include?(status)
         return if status == SUCCESSFUL_STATUS
 
