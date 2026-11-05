@@ -59,7 +59,7 @@ module Actions
       end
 
       def fill_continuous_output(continuous_output)
-        task.template_invocation.template_invocation_events.order(:timestamp).find_each do |event|
+        task.template_invocation.template_invocation_events.order(:timestamp, :id).find_each do |event|
           continuous_output.add_raw_output(event.as_raw_continuous_output)
         end
       end

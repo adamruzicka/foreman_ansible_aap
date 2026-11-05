@@ -73,6 +73,143 @@ class EventIngestorTest < ActiveSupport::TestCase
     ], output_events.map(&:external_id)
   end
 
+  test 'stores each stdout line as its own event so the output viewer numbers lines correctly' do
+    stdout = "first line\n\nsecond line\n"
+
+    ingest(AapClient.new([event(41, stdout, host_name: @host.name)]))
+
+    assert_equal ['first line', '', 'second line'], output_events.map(&:event)
+    assert_equal stdout, "#{output_events.map(&:event).join("\n")}\n"
+  end
+
+  test 'never wraps a line in the middle of an ANSI escape sequence' do
+    stdout = "\e[0;32m#{'x' * 300}\e[0m"
+
+    ingest(AapClient.new([event(41, stdout, host_name: @host.name)]))
+
+    stored = output_events.map(&:event)
+    assert stored.all? { |chunk| chunk.length <= 255 }
+    # no event may end in the middle of an escape sequence
+    assert_not stored.any? { |chunk| chunk.match?(/\e\[[0-9;]*\z/) }
+    assert_equal stdout, stored.join
+  end
+
+  test 'renders exactly one blank line before heading events, matching AAP output' do
+    ingest(AapClient.new([
+      event(41, "Identity added: /runner/artifacts/86/ssh_key_data (root@ip-10-0-168-24)\r\n", host_name: nil),
+      event(42, "\r\n\e[1;35mPLAY [all] *****\e[0m\r\n\r\n", host_name: nil),
+      event(43, "\r\n\e[1;36mTASK [Gathering Facts] ***\e[0m\r\n", host_name: nil),
+      event(44, "\r\n\r\nPLAY RECAP *****\r\nip-10-0-167-36 : ok=3 changed=1\r\n", host_name: nil),
+    ]))
+
+    assert_equal [
+      'Identity added: /runner/artifacts/86/ssh_key_data (root@ip-10-0-168-24)',
+      '',
+      "\e[1;35mPLAY [all] *****\e[0m",
+      '',
+      "\e[1;36mTASK [Gathering Facts] ***\e[0m",
+      '',
+      'PLAY RECAP *****',
+      'ip-10-0-167-36 : ok=3 changed=1',
+    ], output_events.map(&:event)
+  end
+
+  test 'stored timestamps strictly increase so the output viewer cannot reorder lines' do
+    base = '2026-11-05T18:44:30.640301Z'
+    ingest(AapClient.new([
+      event(41, "first\n", host_name: @host.name, timestamp: base),
+      event(42, "second\nthird\n", host_name: @host.name, timestamp: base),
+      event(43, "fourth\n", host_name: @host.name, timestamp: base),
+    ]))
+
+    timestamps = output_events.map(&:timestamp)
+    assert_equal timestamps.sort, timestamps
+    assert_equal timestamps.uniq, timestamps
+  end
+
+  test 'fans hostless playbook events out to every host invocation' do
+    other_host = FactoryBot.create(:host, name: 'other.example.test')
+    FactoryBot.create(:template_invocation, job_invocation: @job_invocation, host: other_host)
+
+    ingest(AapClient.new([
+      event(41, "PLAY [all] *****\n", host_name: nil),
+      event(42, "TASK [Gathering Facts] ***\n", host_name: nil),
+      event(43, 'ok: [node.example.test]', host_name: @host.name),
+    ]))
+
+    node_output = output_events(@template_invocation).map(&:event)
+    other_output = output_events(::TemplateInvocation.find_by(host: other_host)).map(&:event)
+    assert_equal ['', 'PLAY [all] *****', '', 'TASK [Gathering Facts] ***', 'ok: [node.example.test]'], node_output
+    assert_equal ['', 'PLAY [all] *****', '', 'TASK [Gathering Facts] ***'], other_output
+    assert_equal 43, @execution.reload.event_cursor
+
+    # a restart must not duplicate the fanned-out events
+    ingest(AapClient.new([event(42, "TASK [Gathering Facts] ***\n", host_name: nil)]))
+
+    assert_equal 5, output_events(@template_invocation).count
+  end
+
+  test 'orders output by AAP event counter even when events arrive across separate polls' do
+    # job 94 pattern: the hostname result (counter 15) was visible in the
+    # first poll, while the earlier Hello result (counter 9) only arrived in
+    # the second poll; counter-encoded timestamps keep the display order
+    ingest(AapClient.new([event(126, "ok: hostname\r\n", host_name: @host.name, counter: 15)]))
+    ingest(AapClient.new([event(129, "ok: Hello\r\n", host_name: @host.name, counter: 9)]))
+
+    assert_equal ['ok: Hello', 'ok: hostname'], output_events.map(&:event)
+  end
+
+  test 'does not drop lower-id events that follow a higher-id event in line order' do
+    # job 94 pattern: event 132 (start_line 13) is persisted before events
+    # 128/126/130 (start_line 16/18/21); the cursor must not make the ingestor
+    # treat the later-line, lower-id events as already ingested
+    ingest(AapClient.new([
+      event(132, "ok: => { \"World\" }\r\n", host_name: @host.name, start_line: 13, end_line: 16),
+      event(128, "\r\nTASK [debug] ***\r\n", host_name: nil, start_line: 16, end_line: 18),
+      event(126, "ok: => { \"hostname\" }\r\n", host_name: @host.name, start_line: 18, end_line: 21),
+      event(130, "\r\nPLAY RECAP ***\r\n\r\n", host_name: nil, start_line: 21, end_line: 25),
+    ]))
+
+    assert_equal [
+      'ok: => { "World" }',
+      '',
+      'TASK [debug] ***',
+      'ok: => { "hostname" }',
+      '',
+      'PLAY RECAP ***',
+    ], output_events.map(&:event)
+    assert_equal 132, @execution.reload.event_cursor
+  end
+
+  test 'stores events in AAP output line order, which differs from event id order' do
+    # real shape of AAP job 90: later-arriving events can address earlier
+    # output lines, e.g. the facts result (start_line 5) got id 110 while
+    # the TASK header after it (start_line 6) got id 114
+    ingest(AapClient.new([
+      event(108, "ok: => { \"Hello\" }\r\n", host_name: @host.name, start_line: 8, end_line: 11),
+      event(109, "\r\nTASK [debug] ***\r\n", host_name: nil, start_line: 11, end_line: 13),
+      event(110, "ok: [node.example.test]\r\n", host_name: @host.name, start_line: 5, end_line: 6),
+      event(114, "\r\nTASK [debug] ***\r\n", host_name: nil, start_line: 6, end_line: 8),
+    ]))
+
+    assert_equal [
+      'ok: [node.example.test]',
+      '',
+      'TASK [debug] ***',
+      'ok: => { "Hello" }',
+    ], output_events.map(&:event)
+  end
+
+  test 'stores events in AAP event id order regardless of the order they were fetched' do
+    ingest(AapClient.new([
+      event(43, 'third', host_name: @host.name),
+      event(41, 'first', host_name: @host.name),
+      event(42, 'second', host_name: @host.name),
+    ]))
+
+    assert_equal %w[first second third], output_events.map(&:event)
+  end
+
   private
 
   def first_poll_events
@@ -100,17 +237,20 @@ class EventIngestorTest < ActiveSupport::TestCase
     ).ingest(91)
   end
 
-  def output_events
-    @template_invocation.template_invocation_events.order(:timestamp).to_a
+  def output_events(invocation = @template_invocation)
+    invocation.template_invocation_events.order(:timestamp, :id).to_a
   end
 
-  def event(id, stdout, host_name:, remote_addr: nil)
+  def event(id, stdout, host_name:, remote_addr: nil, timestamp: nil, start_line: nil, end_line: nil, counter: nil)
     {
       id: id,
       stdout: stdout,
-      timestamp: "2026-10-30T09:00:#{id}Z",
+      timestamp: timestamp || "2026-10-30T09:00:#{id}Z",
       host_name: host_name,
       remote_addr: remote_addr,
+      start_line: start_line,
+      end_line: end_line,
+      counter: counter,
     }
   end
 end

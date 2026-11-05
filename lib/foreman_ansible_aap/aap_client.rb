@@ -274,6 +274,9 @@ module ForemanAnsibleAap
         stdout: event.fetch('stdout', ''),
         timestamp: event.fetch('created'),
         host_name: event.fetch('event_data', {})['host'],
+        start_line: event['start_line'],
+        end_line: event['end_line'],
+        counter: event['counter'],
       }
     end
 
