@@ -50,12 +50,12 @@ module ForemanAnsibleAap
       transport.get("inventories/#{contract.fetch(:inventory_id)}/")
       inventory_sources = transport.get("inventories/#{contract.fetch(:inventory_id)}/inventory_sources/")
 
-      expect(template, 'project', contract.fetch(:project_id), 'Job Template Project')
-      expect(template, 'inventory', contract.fetch(:inventory_id), 'Job Template inventory')
+      expect_identifier(template, 'project', contract.fetch(:project_id).to_s, 'Job Template Project')
+      expect_identifier(template, 'inventory', contract.fetch(:inventory_id).to_s, 'Job Template inventory')
       expect(template, 'playbook', contract.fetch(:playbook_path), 'Job Template playbook')
       expect(project, 'scm_url', contract.fetch(:repository_url), 'Project repository')
-      expect(project, 'update_on_launch', true, 'Project update-on-launch')
-      unless inventory_sources.fetch('results').any? { |source| source['update_on_launch'] }
+      expect_update_on_launch(project, 'Project')
+      unless inventory_sources.fetch('results').any? { |source| update_on_launch?(source) }
         raise ConfigurationError, 'Inventory requires an update-on-launch source'
       end
       %w[ask_scm_branch_on_launch ask_limit_on_launch ask_variables_on_launch].each do |field|
@@ -183,11 +183,42 @@ module ForemanAnsibleAap
       path
     end
 
+    # Older AAP exposes "update_on_launch" on projects; newer AAP renamed the
+    # project field to "scm_update_on_launch". Inventory sources keep
+    # "update_on_launch" in both.
+    UPDATE_ON_LAUNCH_FIELDS = %w[update_on_launch scm_update_on_launch].freeze
+
+    def expect_update_on_launch(resource, label)
+      unless UPDATE_ON_LAUNCH_FIELDS.any? { |field| resource[field] == true }
+        actual = UPDATE_ON_LAUNCH_FIELDS.map { |field| resource[field] }
+        raise ConfigurationError, "#{label} update-on-launch is #{actual.inspect}, expected [true]"
+      end
+    end
+
+    def update_on_launch?(resource)
+      UPDATE_ON_LAUNCH_FIELDS.any? { |field| resource[field] == true }
+    end
+
     def expect(resource, field, expected, label)
       actual = resource.fetch(field)
       return if actual == expected
 
       raise ConfigurationError, "#{label} is #{actual.inspect}, expected #{expected.inspect}"
+    end
+
+    def expect_identifier(resource, field, expected, label)
+      actual = resource.fetch(field)
+      actual_id = normalize_identifier(actual)
+      expected_id = normalize_identifier(expected)
+      return if actual_id && actual_id == expected_id
+
+      raise ConfigurationError, "#{label} is #{actual.inspect}, expected #{expected.inspect}"
+    end
+
+    def normalize_identifier(value)
+      Integer(value)
+    rescue ArgumentError, TypeError
+      nil
     end
 
     def validate_launch_response!(response, attributes, job_id)

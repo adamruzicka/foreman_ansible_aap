@@ -24,7 +24,7 @@ class AapClientTest < ActiveSupport::TestCase
           'ask_variables_on_launch' => true,
         }
       when %r{projects/9/}
-        { 'scm_url' => 'https://git.example.test/generated.git', 'update_on_launch' => true }
+        { 'scm_url' => 'https://git.example.test/generated.git', 'scm_update_on_launch' => true }
       when %r{inventories/8/inventory_sources/}
         { 'results' => [{ 'update_on_launch' => true }] }
       when %r{inventories/8/}
@@ -162,7 +162,7 @@ class AapClientTest < ActiveSupport::TestCase
       when :repository_url
         resource['scm_url'] = 'https://git.example.test/human-authored.git' if path.match?(%r{projects/9/})
       when :project_update
-        resource['update_on_launch'] = false if path.match?(%r{projects/9/})
+        resource['scm_update_on_launch'] = false if path.match?(%r{projects/9/})
       when :inventory_update
         resource['results'] = [{ 'update_on_launch' => false }] if path.match?(%r{inventory_sources/})
       else
@@ -209,11 +209,52 @@ class AapClientTest < ActiveSupport::TestCase
     ], client.host_summaries(91)
   end
 
+  test 'preflights numeric AAP resource IDs stored as Foreman setting strings' do
+    client = ForemanAnsibleAap::AapClient.new(
+      controller_url: 'https://unused.example.test',
+      token: 'secret',
+      ca_bundle: nil,
+      transport: Transport.new
+    )
+
+    assert client.preflight!(
+      job_template_id: '7',
+      inventory_id: '8',
+      project_id: '9',
+      repository_url: 'https://git.example.test/generated.git',
+      playbook_path: 'generated/foreman.yml'
+    )
+  end
+
   test 'rejects a controller endpoint without TLS' do
     assert_raises(ForemanAnsibleAap::AapClient::ConfigurationError) do
       ForemanAnsibleAap::AapClient.new(
         controller_url: 'http://aap.example.test', token: 'secret', ca_bundle: nil
       )
+    end
+  end
+
+  test 'preflight accepts both project update-on-launch field names' do
+    contract = {
+      job_template_id: 7,
+      inventory_id: 8,
+      project_id: 9,
+      repository_url: 'https://git.example.test/generated.git',
+      playbook_path: 'generated/foreman.yml',
+    }
+
+    %w[update_on_launch scm_update_on_launch].each do |field|
+      transport = Transport.new
+      transport.define_singleton_method(:get) do |path|
+        resource = super(path)
+        if path.match?(%r{projects/9/})
+          resource.delete('scm_update_on_launch')
+          resource[field] = true
+        end
+        resource
+      end
+
+      assert build_client(transport).preflight!(contract), field
     end
   end
 
