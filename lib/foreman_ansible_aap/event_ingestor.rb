@@ -106,7 +106,7 @@ module ForemanAnsibleAap
                    .sub(/\A\n+/, '').split("\n")
       lines.unshift('') if lines.first&.match?(HEADING_PATTERN)
       lines = lines.reject { |line| recap_line_for?(line, other_hosts) } if other_hosts.any?
-      lines.flat_map { |line| wrap_line(line) }
+      lines.flat_map { |line| AnsiLineWrapper.wrap(line, OUTPUT_CHUNK_SIZE) }
     end
 
     # Recap lines look like "\e[0;32mhost.example.com\e[0m : ok=4 changed=0 ...";
@@ -115,21 +115,6 @@ module ForemanAnsibleAap
       other_hosts.any? do |host|
         line.match?(/\A(?:\e\[[0-9;]*m)*#{Regexp.escape(host)}(?:\e\[[0-9;]*m)*\s*:/)
       end
-    end
-
-    def wrap_line(line)
-      return [line] if line.length <= OUTPUT_CHUNK_SIZE
-
-      chunks = []
-      buffer = +''
-      line.scan(/\e\[[0-9;]*[A-Za-z]|./m).each do |token|
-        if buffer.length + token.length > OUTPUT_CHUNK_SIZE
-          chunks << buffer
-          buffer = +''
-        end
-        buffer << token
-      end
-      chunks << buffer
     end
 
     def output_rows(template_invocation, job_id, event, chunks, timestamp)
@@ -150,15 +135,11 @@ module ForemanAnsibleAap
     # already-stored later lines. Events without a counter fall back to the
     # event timestamp, nudged past the latest stored line to stay monotonic.
     def event_timestamp(template_invocation, event)
-      return next_timestamp(template_invocation, event.fetch(:timestamp)) unless event[:counter]
+      return TimestampSequence.next_after(
+        template_invocation, Time.zone.parse(event.fetch(:timestamp).to_s).round(6)
+      ) unless event[:counter]
 
       execution_record.created_at + event.fetch(:counter).seconds
-    end
-
-    def next_timestamp(template_invocation, remote_timestamp)
-      timestamp = Time.zone.parse(remote_timestamp.to_s).round(6)
-      latest = template_invocation.template_invocation_events.maximum(:timestamp)
-      latest && timestamp <= latest ? latest + 1r / 1_000_000r : timestamp
     end
 
     def persist_diagnostic(job_id, event)

@@ -49,8 +49,7 @@ module ForemanAnsibleAap
       # AAP output lines carry synthetic timestamps (job anchor + event
       # counter), which can run past wall-clock time on short jobs; settle
       # events must always render after the host's output.
-      latest = invocation.template_invocation_events.maximum(:timestamp)
-      timestamp = latest ? [Time.zone.now, latest + 1r / 1_000_000r].max : Time.zone.now
+      timestamp = TimestampSequence.next_after(invocation, Time.zone.now)
       TemplateInvocationEvent.create!(
         template_invocation: invocation,
         external_id: external_id,
