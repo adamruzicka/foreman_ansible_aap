@@ -1,6 +1,9 @@
 # frozen_string_literal: true
 
 module ForemanAnsibleAap
+  # Rejects unsupported execution controls on an (about-to-be-persisted)
+  # JobInvocation model. Raw API parameters are covered by the sibling
+  # UnsupportedParams; both share the MESSAGES catalogue.
   class UnsupportedControls
     MESSAGES = {
       ssh_user: N_('SSH user is not supported by the AAP execution driver'),
@@ -13,36 +16,21 @@ module ForemanAnsibleAap
       smart_proxy: N_('Smart proxy selection is not supported by the AAP execution driver'),
       provider_inputs: N_('Ansible proxy provider options are not supported by the AAP execution driver'),
     }.freeze
-    PARAMETER_PATHS = {
-      ssh_user: %i[ssh_user],
-      password: %i[password],
-      key_passphrase: %i[key_passphrase],
-      effective_user: %i[ssh effective_user],
-      effective_user_password: %i[ssh effective_user_password],
-      concurrency_level: %i[concurrency_control concurrency_level],
-      execution_timeout: %i[execution_timeout_interval],
-    }.freeze
     MODEL_ATTRIBUTES = %i[ssh_user password key_passphrase effective_user_password concurrency_level].freeze
     FILTERED_CANCELLATION_MESSAGE = N_(
       'Host-filtered cancellation is not supported for a single aggregate AAP job; ' \
       'cancel the whole Job Invocation instead.'
     )
 
-    def self.for_params(params, aap:, template: nil)
-      new(nil, aap: aap, params: params, template: template)
-    end
-
-    def initialize(job_invocation, aap: nil, params: nil, template: nil)
+    def initialize(job_invocation, aap: nil)
       @job_invocation = job_invocation
       @aap = aap
-      @params = params
-      @template = template
     end
 
     def messages
       return [] unless aap_backed?
 
-      params ? parameter_control_messages : invocation_control_messages + template_control_messages
+      invocation_control_messages + template_control_messages
     end
 
     def validate!
@@ -53,7 +41,7 @@ module ForemanAnsibleAap
 
     private
 
-    attr_reader :job_invocation, :aap, :params, :template
+    attr_reader :job_invocation, :aap
 
     def aap_backed?
       return aap unless aap.nil?
@@ -69,31 +57,6 @@ module ForemanAnsibleAap
 
         message(attribute)
       end
-    end
-
-    def parameter_control_messages
-      messages = PARAMETER_PATHS.filter_map do |control, path|
-        value = params.dig(*path)
-        message(control) if unsupported_parameter?(control, value)
-      end
-      messages << message(:provider_inputs) if provider_params?
-      messages
-    end
-
-    def unsupported_parameter?(control, value)
-      return false if value.blank?
-      return value != Setting[:remote_execution_effective_user] if control == :effective_user
-      if control == :execution_timeout && template
-        inherited_timeout = template.execution_timeout_interval
-        return inherited_timeout.blank? || value.to_i != inherited_timeout.to_i
-      end
-
-      true
-    end
-
-    def provider_params?
-      provider_params = params[:ansible]
-      provider_params.respond_to?(:values) && provider_params.values.any?(&:present?)
     end
 
     def template_control_messages

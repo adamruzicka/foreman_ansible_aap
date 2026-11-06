@@ -30,7 +30,7 @@ module ForemanAnsibleAap
         return [] unless aap_creation?
 
         invocation = params.fetch(:job_invocation, {})
-        UnsupportedControls.for_params(invocation, aap: true, template: selected_template).messages
+        UnsupportedParams.new(invocation, template: selected_template).messages
       end
 
       def aap_creation?

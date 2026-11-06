@@ -57,9 +57,8 @@ class JobInvocationExtensionsTest < ActiveSupport::TestCase
     @invocation.ssh_user = 'proxy-managed-user'
     model_messages = ForemanAnsibleAap::UnsupportedControls.new(@invocation).messages
 
-    parameter_messages = ForemanAnsibleAap::UnsupportedControls.for_params(
-      { ssh_user: 'proxy-managed-user' },
-      aap: true
+    parameter_messages = ForemanAnsibleAap::UnsupportedParams.new(
+      { ssh_user: 'proxy-managed-user' }
     ).messages
 
     assert_equal model_messages, parameter_messages
@@ -74,12 +73,11 @@ class JobInvocationExtensionsTest < ActiveSupport::TestCase
     @invocation.execution_timeout_interval = 30
 
     model_messages = ForemanAnsibleAap::UnsupportedControls.new(@invocation).messages
-    parameter_messages = ForemanAnsibleAap::UnsupportedControls.for_params(
+    parameter_messages = ForemanAnsibleAap::UnsupportedParams.new(
       {
         ssh: { effective_user: default_user },
         execution_timeout_interval: 30,
       },
-      aap: true,
       template: template
     ).messages
 
