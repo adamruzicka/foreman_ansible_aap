@@ -70,6 +70,7 @@ module ForemanAnsibleAap
         "job_templates/#{attributes.fetch(:job_template_id)}/launch/",
         'scm_branch' => attributes.fetch(:scm_branch),
         'limit' => attributes.fetch(:limit),
+        'labels' => attributes.fetch(:labels, []),
         'extra_vars' => attributes.fetch(:extra_vars)
       )
       id = response.fetch('id')

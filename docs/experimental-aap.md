@@ -119,10 +119,18 @@ at most one AAP playbook job.
 
 At launch Foreman sends only:
 
-- the immutable generated ref as `scm_branch`;
+- the immutable generated tag ref as `scm_branch`;
 - the comma-separated, exact prepared host names as `limit`; and
-- the correlation variables `foreman_instance_id` and
-  `foreman_job_invocation_id`.
+- the correlation variables `foreman_instance_id`,
+  `foreman_job_invocation_id`, and `foreman_job_url` (a link back to the
+  Foreman job invocation, built from the `foreman_url` setting) as
+  `extra_vars`.
+
+Foreman also attaches correlation labels (`foreman`,
+`foreman-instance-<instance-id>`, `foreman-job-invocation-<id>`) so the
+origin is visible and filterable directly in the AAP job list. Labels are
+best-effort traceability, not safety-critical: if AAP ignores them (older
+versions or label-creation restrictions), the launch still proceeds.
 
 If AAP reports that branch, limit, or variables were ignored or changed,
 Foreman requests cancellation and fails the invocation.

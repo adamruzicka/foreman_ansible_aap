@@ -28,6 +28,14 @@ module ForemanAnsibleAap
     end
     MAXIMUM_BACKOFF = 30
 
+    # Best-effort link back to the Foreman job invocation, surfaced to AAP
+    # operators through extra variables.
+    DEFAULT_JOB_URL_BUILDER = ->(invocation) do
+      base = Setting[:foreman_url].to_s
+      base = "https://#{base}" unless base.start_with?('http://', 'https://')
+      "#{base}/job_invocations/#{invocation.id}"
+    end
+
     def initialize(job_invocation:, execution_record:, prepared_hosts:, configuration:, dependencies:)
       @job_invocation = job_invocation
       @execution_record = execution_record
@@ -39,6 +47,7 @@ module ForemanAnsibleAap
       @event_ingestor = dependencies.fetch(:event_ingestor)
       @result_settler = dependencies.fetch(:result_settler)
       @sleeper = dependencies.fetch(:sleeper, ->(duration) { sleep duration })
+      @job_url_builder = dependencies.fetch(:job_url_builder) { DEFAULT_JOB_URL_BUILDER }
     end
 
     def call
@@ -93,7 +102,7 @@ module ForemanAnsibleAap
     private
 
     attr_reader :job_invocation, :execution_record, :prepared_hosts, :configuration, :renderer,
-      :publisher, :aap_client, :event_ingestor, :result_settler, :sleeper
+      :publisher, :aap_client, :event_ingestor, :result_settler, :sleeper, :job_url_builder
 
     def completed_result(state)
       Result.new(
@@ -222,11 +231,23 @@ module ForemanAnsibleAap
         job_template_id: configuration.job_template_id,
         scm_branch: scm_ref,
         limit: prepared_hosts.map(&:name).join(','),
+        labels: correlation_labels,
         extra_vars: {
           foreman_instance_id: configuration.instance_id,
           foreman_job_invocation_id: job_invocation.id,
+          foreman_job_url: job_url_builder.call(job_invocation),
         }
       )
+    end
+
+    # Labels make the Foreman origin visible and filterable directly in the
+    # AAP job list without opening the job's extra variables.
+    def correlation_labels
+      [
+        'foreman',
+        "foreman-instance-#{configuration.instance_id}",
+        "foreman-job-invocation-#{job_invocation.id}",
+      ]
     end
 
     def persist_remote_job(remote_job)

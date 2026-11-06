@@ -407,6 +407,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
         event_ingestor: event_ingestor,
         result_settler: settler,
         sleeper: Sleeper.new,
+        job_url_builder: ->(invocation) { "https://foreman.example.test/job_invocations/#{invocation.id}" },
       }
     ).call
 
@@ -434,9 +435,11 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       job_template_id: 7,
       scm_branch: 'foreman/foreman-prod/job-invocation-42',
       limit: 'node-1.example.test,node-2.example.test',
+      labels: ['foreman', 'foreman-instance-foreman-prod', 'foreman-job-invocation-42'],
       extra_vars: {
         foreman_instance_id: 'foreman-prod',
         foreman_job_invocation_id: 42,
+        foreman_job_url: 'https://foreman.example.test/job_invocations/42',
       },
     }, aap_client.launches.first)
     assert_equal [91, 91, 91, 91], aap_client.status_requests

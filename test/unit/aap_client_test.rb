@@ -199,6 +199,7 @@ class AapClientTest < ActiveSupport::TestCase
       {
         'scm_branch' => 'foreman/prod/job-invocation-42',
         'limit' => 'node.example.test',
+        'labels' => [],
         'extra_vars' => { foreman_job_invocation_id: 42 },
       },
     ]], transport.posts
