@@ -73,7 +73,9 @@ module ForemanAnsibleAap
     # Tag refs are fetched by AAP's default fetch refspec (unlike refs in
     # custom namespaces) and are not expected to move, which keeps the
     # per-invocation artifact immutable from AAP's point of view.
-    TAG_REF = ->(ref) { "refs/tags/#{ref}" }
+    def tag_ref(ref)
+      "refs/tags/#{ref}"
+    end
 
     def credential_environment(directory, attributes)
       askpass = File.join(directory, 'askpass')
@@ -105,12 +107,12 @@ module ForemanAnsibleAap
     end
 
     def remote_ref_sha(environment, repository, ref)
-      output = run(environment, 'git', 'ls-remote', '--tags', 'origin', TAG_REF.call(ref), chdir: repository)
+      output = run(environment, 'git', 'ls-remote', '--tags', 'origin', tag_ref(ref), chdir: repository)
       output.split.first
     end
 
     def matching_existing_content!(environment, repository, ref, existing_sha, path, expected_content)
-      run(environment, 'git', 'fetch', 'origin', TAG_REF.call(ref), chdir: repository)
+      run(environment, 'git', 'fetch', 'origin', tag_ref(ref), chdir: repository)
       existing_content = begin
         run(environment, 'git', 'show', "FETCH_HEAD:#{path}", chdir: repository)
       rescue PublicationError
