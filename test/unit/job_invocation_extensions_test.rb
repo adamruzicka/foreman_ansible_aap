@@ -16,12 +16,12 @@ class JobInvocationExtensionsTest < ActiveSupport::TestCase
       job_invocation: @invocation,
       aap_job_id: 91,
       aap_job_url: 'https://aap.example.test/api/controller/v2/jobs/91/',
-      event_diagnostics: JSON.generate([{
-        external_id: 'aap-job-91-event-7',
-        host_name: 'delegate.example.test',
-        output: 'delegated startup output',
-        timestamp: '2026-10-30T09:00:00Z',
-      }]),
+      event_diagnostics: [{
+        'external_id' => 'aap-job-91-event-7',
+        'host_name' => 'delegate.example.test',
+        'output' => 'delegated startup output',
+        'timestamp' => '2026-10-30T09:00:00Z',
+      }],
       output_incomplete: true,
       output_failure_diagnostic: 'AAP output page 2 was unavailable'
     )

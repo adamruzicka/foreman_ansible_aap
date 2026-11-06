@@ -173,7 +173,7 @@ module ForemanAnsibleAap
           'output' => event.fetch(:stdout, ''),
           'timestamp' => event.fetch(:timestamp).to_s,
         }
-        execution_record.update!(event_diagnostics: JSON.generate(diagnostics))
+        execution_record.update!(event_diagnostics: diagnostics)
       end
     end
   end
