@@ -77,6 +77,13 @@ module ForemanAnsibleAap
       "refs/tags/#{ref}"
     end
 
+    # Publication runs inside background jobs where an interactive prompt
+    # (SSH password, key passphrase, or host-key confirmation) would hang a
+    # worker forever. BatchMode makes ssh fail fast instead of prompting;
+    # GIT_TERMINAL_PROMPT and GIT_ASKPASS cover git's own HTTP credential
+    # prompts.
+    NON_INTERACTIVE_SSH = 'ssh -oBatchMode=yes'
+
     def credential_environment(directory, attributes)
       askpass = File.join(directory, 'askpass')
       File.write(askpass, <<~'SCRIPT')
@@ -90,6 +97,7 @@ module ForemanAnsibleAap
       {
         'GIT_ASKPASS' => askpass,
         'GIT_TERMINAL_PROMPT' => '0',
+        'GIT_SSH_COMMAND' => NON_INTERACTIVE_SSH,
         'FOREMAN_AAP_GIT_USERNAME' => attributes.fetch(:username).to_s,
         'FOREMAN_AAP_GIT_PASSWORD' => attributes.fetch(:password).to_s,
       }
