@@ -7,10 +7,15 @@ require 'uri'
 module ForemanAnsibleAap
   class AapClient
     class ConfigurationError < StandardError; end
+
     class RequestError < StandardError; end
-    class DefinitiveRequestError < RequestError; end
-    class AmbiguousRequestError < RequestError; end
-    class HttpError < DefinitiveRequestError
+
+    class TransientError < RequestError; end
+    class PermanentError < RequestError; end
+    # Raised by the transport on non-2xx responses; whether it is transient
+    # (429/5xx) or permanent depends on the status, so callers classify via
+    # #status rather than the class hierarchy.
+    class HttpError < RequestError
       attr_reader :status
 
       def initialize(status)
@@ -18,8 +23,12 @@ module ForemanAnsibleAap
         super("AAP request failed with HTTP #{status}")
       end
     end
-    class TransientError < RequestError; end
-    class PermanentError < RequestError; end
+
+    # Transport-level failures that could not be classified by status:
+    # connection problems are transient; structurally invalid responses are
+    # permanent.
+    class DefinitiveRequestError < PermanentError; end
+    class AmbiguousRequestError < TransientError; end
 
     NETWORK_ERRORS = [
       Timeout::Error,
@@ -30,6 +39,7 @@ module ForemanAnsibleAap
       Net::OpenTimeout,
       Net::ReadTimeout,
     ].freeze
+
     class UnsafeLaunchError < StandardError; end
     class DefinitiveLaunchError < StandardError; end
     class AmbiguousLaunchError < StandardError; end
@@ -76,6 +86,13 @@ module ForemanAnsibleAap
       id = response.fetch('id')
       validate_launch_response!(response, attributes, id)
       { id: id, url: absolute_url(response.fetch('url')) }
+    rescue HttpError => e
+      if e.status == 429 || e.status >= 500
+        raise AmbiguousLaunchError,
+          "AAP launch could not be confirmed or persisted; AAP might still be executing: #{e.message}"
+      end
+
+      raise DefinitiveLaunchError, "AAP rejected the launch: #{e.message}"
     rescue DefinitiveRequestError => e
       raise DefinitiveLaunchError, "AAP rejected the launch: #{e.message}"
     rescue AmbiguousRequestError, KeyError, JSON::ParserError => e
@@ -91,11 +108,6 @@ module ForemanAnsibleAap
       observe("job #{job_id}", job_id: job_id) do
         transport.get("jobs/#{job_id}/").fetch('status')
       end
-    end
-
-    def cancel!(job_id)
-      cancel(job_id)
-      true
     end
 
     def job_events(job_id, after_id: nil)

@@ -309,7 +309,7 @@ class AapClientTest < ActiveSupport::TestCase
       controller_url: 'https://unused.example.test', token: 'secret', ca_bundle: nil, transport: transport
     )
 
-    assert client.cancel!(91)
+    assert client.cancel(91)
 
     assert_equal [['jobs/91/cancel/', {}]], transport.posts
   end
@@ -419,7 +419,7 @@ class AapClientTest < ActiveSupport::TestCase
 
   test 'classifies a definitive launch rejection without retrying it' do
     transport = FailingLaunchTransport.new(
-      ForemanAnsibleAap::AapClient::DefinitiveRequestError.new('HTTP 400')
+      ForemanAnsibleAap::AapClient::HttpError.new(400)
     )
     client = ForemanAnsibleAap::AapClient.new(
       controller_url: 'https://unused.example.test', token: 'secret', ca_bundle: nil, transport: transport
@@ -429,7 +429,7 @@ class AapClientTest < ActiveSupport::TestCase
       client.launch(job_template_id: 7, scm_branch: 'safe-ref', limit: 'node', extra_vars: {})
     end
 
-    assert_equal 'AAP rejected the launch: HTTP 400', error.message
+    assert_equal 'AAP rejected the launch: AAP request failed with HTTP 400', error.message
     assert_equal 1, transport.launch_attempts
   end
 
@@ -450,6 +450,20 @@ class AapClientTest < ActiveSupport::TestCase
 
     assert_match(/returned a different scm_branch/, error.message)
     assert_equal ['jobs/91/cancel/', {}], transport.posts.last
+  end
+
+  test 'classifies a rate-limited or failing launch as ambiguous without retrying it' do
+    transport = FailingLaunchTransport.new(
+      ForemanAnsibleAap::AapClient::HttpError.new(503)
+    )
+    client = build_client(transport)
+
+    error = assert_raises(ForemanAnsibleAap::AapClient::AmbiguousLaunchError) do
+      client.launch(job_template_id: 7, scm_branch: 'safe-ref', limit: 'node', extra_vars: {})
+    end
+
+    assert_match(/AAP might still be executing/, error.message)
+    assert_equal 1, transport.launch_attempts
   end
 
   test 'warns that AAP might still be executing after an ambiguous launch without retrying it' do

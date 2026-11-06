@@ -181,7 +181,7 @@ module ForemanAnsibleAap
       # Record intent before crossing the HTTP boundary. A crash can therefore
       # lose a cancellation request, but can never duplicate one.
       execution_record.update!(cancellation_sent_at: Time.zone.now)
-      aap_client.cancel!(job_id)
+      aap_client.cancel(job_id)
     end
 
     def finish_terminal_job(job_id, status)

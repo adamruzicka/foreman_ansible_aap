@@ -132,7 +132,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       response
     end
 
-    def cancel!(job_id)
+    def cancel(job_id)
       @cancellations << job_id
       true
     end
