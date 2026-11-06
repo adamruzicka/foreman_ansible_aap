@@ -11,7 +11,9 @@ module ForemanAnsibleAap
     class RequestError < StandardError; end
 
     class TransientError < RequestError; end
+
     class PermanentError < RequestError; end
+
     # Raised by the transport on non-2xx responses; whether it is transient
     # (429/5xx) or permanent depends on the status, so callers classify via
     # #status rather than the class hierarchy.
@@ -76,11 +78,12 @@ module ForemanAnsibleAap
     end
 
     def launch(attributes)
+      job_template_id = attributes.fetch(:job_template_id)
       response = transport.post(
-        "job_templates/#{attributes.fetch(:job_template_id)}/launch/",
+        "job_templates/#{job_template_id}/launch/",
         'scm_branch' => attributes.fetch(:scm_branch),
         'limit' => attributes.fetch(:limit),
-        'labels' => attributes.fetch(:labels, []),
+        'labels' => resolve_labels(attributes.fetch(:labels, []), job_template_id),
         'extra_vars' => attributes.fetch(:extra_vars)
       )
       id = response.fetch('id')
@@ -180,6 +183,26 @@ module ForemanAnsibleAap
         path = next_page(page)
       end
       results
+    end
+
+    # The launch endpoint takes label IDs, not names (AAP 2.6 rejects a
+    # launch whose labels are strings with HTTP 400). Labels are scoped to
+    # an organization, so take the organization from the job template being
+    # launched and find or create each label there.
+    def resolve_labels(names, job_template_id)
+      return [] if names.empty?
+
+      organization_id = transport.get("job_templates/#{job_template_id}/").fetch('organization')
+      names.map { |name| label_id(name, organization_id) }
+    end
+
+    def label_id(name, organization_id)
+      matching = paginated_results("labels/?name=#{URI.encode_www_form_component(name)}").select do |label|
+        label['organization'] == organization_id
+      end
+      return matching.first.fetch('id') if matching.any?
+
+      transport.post('labels/', 'name' => name, 'organization' => organization_id).fetch('id')
     end
 
     def page_results(page)

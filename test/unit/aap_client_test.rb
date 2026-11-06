@@ -18,11 +18,18 @@ class AapClientTest < ActiveSupport::TestCase
         {
           'project' => 9,
           'inventory' => 8,
+          'organization' => 3,
           'playbook' => 'generated/foreman.yml',
           'ask_scm_branch_on_launch' => true,
           'ask_limit_on_launch' => true,
           'ask_variables_on_launch' => true,
         }
+      when %r{labels/\?name=foreman$}
+        { 'results' => [{ 'id' => 61, 'organization' => 3 }] }
+      when %r{labels/\?name=foreman-instance-prod$}
+        { 'results' => [{ 'id' => 62, 'organization' => 1 }] }
+      when %r{labels/\?name=foreman-job-invocation-42$}
+        { 'results' => [] }
       when %r{projects/9/}
         { 'scm_url' => 'https://git.example.test/generated.git', 'scm_update_on_launch' => true }
       when %r{inventories/8/inventory_sources/}
@@ -50,6 +57,8 @@ class AapClientTest < ActiveSupport::TestCase
 
     def post(path, body)
       @posts << [path, body]
+      return { 'id' => 63 } if path == 'labels/'
+
       { 'id' => 91, 'url' => '/api/controller/v2/jobs/91/' }
     end
 
@@ -393,6 +402,37 @@ class AapClientTest < ActiveSupport::TestCase
     end
 
     assert_equal 'AAP returned an invalid output for AAP job 91 response', events_error.message
+  end
+
+  test 'resolves label names to AAP label IDs before launching' do
+    transport = Transport.new
+    client = build_client(transport)
+
+    launched = client.launch(
+      job_template_id: 7,
+      scm_branch: 'foreman/prod/job-invocation-42',
+      limit: 'node.example.test',
+      labels: %w[foreman foreman-instance-prod foreman-job-invocation-42],
+      extra_vars: {}
+    )
+
+    assert_equal({ id: 91, url: 'https://aap.example.test/api/controller/v2/jobs/91/' }, launched)
+    # foreman exists in the template organization; foreman-instance-prod
+    # exists only in another organization (so it is recreated); the
+    # invocation label does not exist yet.
+    assert_equal [
+      ['labels/', { 'name' => 'foreman-instance-prod', 'organization' => 3 }],
+      ['labels/', { 'name' => 'foreman-job-invocation-42', 'organization' => 3 }],
+      [
+        'job_templates/7/launch/',
+        {
+          'scm_branch' => 'foreman/prod/job-invocation-42',
+          'limit' => 'node.example.test',
+          'labels' => [61, 63, 63],
+          'extra_vars' => {},
+        },
+      ],
+    ], transport.posts
   end
 
   test 'cancels and rejects a launch when AAP ignores a safety-critical field' do
