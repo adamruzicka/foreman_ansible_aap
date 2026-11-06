@@ -87,7 +87,7 @@ module ForemanAnsibleAap
         'timestamp' => Time.zone.parse('2026-10-30T09:00:00Z').to_f,
       }
       relation = mock('template invocation events')
-      relation.expects(:order).with(:timestamp).returns(relation)
+      relation.expects(:order).with(:timestamp, :id).returns(relation)
       relation.expects(:find_each).yields(stub(as_raw_continuous_output: raw_output))
       host_action = Actions::ForemanAnsibleAap::RunHostJob.allocate
       host_action.stubs(:task).returns(

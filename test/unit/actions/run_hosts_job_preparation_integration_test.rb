@@ -250,7 +250,7 @@ module ForemanAnsibleAap
         true
       end.returns(id: 1, url: 'https://aap.example.test/jobs/1/')
       AapClient.any_instance.expects(:job_status).once.with(1).returns('successful')
-      AapClient.any_instance.expects(:job_events).once.with(1, after_id: nil).returns([])
+      AapClient.any_instance.expects(:job_events).at_least(1).with(1, after_id: nil).returns([])
       AapClient.any_instance.expects(:host_summaries).once.with(1).returns(
         hosts.map { |host| { host_name: host.name, successful: true } }
       )
@@ -267,7 +267,7 @@ module ForemanAnsibleAap
         url: 'https://aap.example.test/jobs/1/'
       )
       AapClient.any_instance.expects(:job_status).once.with(1).returns('failed')
-      AapClient.any_instance.expects(:job_events).once.with(1, after_id: nil).returns([])
+      AapClient.any_instance.expects(:job_events).at_least(1).with(1, after_id: nil).returns([])
       AapClient.any_instance.expects(:host_summaries).once.with(1).returns(
         hosts.map { |host| { host_name: host.name, successful: true } }
       )
@@ -299,8 +299,8 @@ module ForemanAnsibleAap
       )
       AapClient.any_instance.expects(:job_status).with(101).once.returns('successful')
       AapClient.any_instance.expects(:job_status).with(102).once.returns('successful')
-      AapClient.any_instance.expects(:job_events).with(101, after_id: nil).once.returns([])
-      AapClient.any_instance.expects(:job_events).with(102, after_id: nil).once.returns([])
+      AapClient.any_instance.expects(:job_events).with(101, after_id: nil).at_least(1).returns([])
+      AapClient.any_instance.expects(:job_events).with(102, after_id: nil).at_least(1).returns([])
       failed_summaries = [
         { host_name: execution_host.name, successful: false },
         { host_name: unreachable_host.name, successful: false, unreachable: true },

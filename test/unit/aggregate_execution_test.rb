@@ -838,7 +838,9 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       execution_record, [host], aap_client, settler, sleeper: sleeper
     ).call
 
-    assert_equal [1, 2, 1, 1], sleeper.durations
+    # the output drain re-runs on every terminal pass (idempotent, 2s each):
+    # drain, summary-retry backoff, drain, backoff, drain
+    assert_equal [1, 1, 1, 1, 1, 2, 1, 1], sleeper.durations
     assert_equal [host], settler.successful_hosts
     assert_equal 0, execution_record.attributes[:polling_failure_count]
   end

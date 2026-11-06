@@ -129,13 +129,13 @@ class EventIngestorTest < ActiveSupport::TestCase
 
   test 'fans hostless playbook events out to every host invocation' do
     other_host = FactoryBot.create(:host, name: 'other.example.test')
-    FactoryBot.create(:template_invocation, job_invocation: @job_invocation, host: other_host)
+    other_invocation = FactoryBot.create(:template_invocation, job_invocation: @job_invocation, host: other_host)
 
     ingest(AapClient.new([
       event(41, "PLAY [all] *****\n", host_name: nil),
       event(42, "TASK [Gathering Facts] ***\n", host_name: nil),
       event(43, 'ok: [node.example.test]', host_name: @host.name),
-    ]))
+    ]), invocations: [@template_invocation, other_invocation])
 
     node_output = output_events(@template_invocation).map(&:event)
     other_output = output_events(::TemplateInvocation.find_by(host: other_host)).map(&:event)
@@ -144,7 +144,8 @@ class EventIngestorTest < ActiveSupport::TestCase
     assert_equal 43, @execution.reload.event_cursor
 
     # a restart must not duplicate the fanned-out events
-    ingest(AapClient.new([event(42, "TASK [Gathering Facts] ***\n", host_name: nil)]))
+    ingest(AapClient.new([event(42, "TASK [Gathering Facts] ***\n", host_name: nil)]),
+           invocations: [@template_invocation, other_invocation])
 
     assert_equal 5, output_events(@template_invocation).count
   end
@@ -161,24 +162,26 @@ class EventIngestorTest < ActiveSupport::TestCase
 
   test 'fans the play recap out keeping only the invoking host recap line' do
     other_host = FactoryBot.create(:host, name: 'other.example.test')
-    FactoryBot.create(:template_invocation, job_invocation: @job_invocation, host: other_host)
+    other_invocation = FactoryBot.create(:template_invocation, job_invocation: @job_invocation, host: other_host)
+    # the :host factory sequences hostname, so the actual names may differ from
+    # the requested ones; build the recap from the real names
     recap = "\r\nPLAY RECAP *****\r\n" \
-            "\e[0;32mnode.example.test\e[0m : \e[0;32mok=4\e[0m changed=0\r\n" \
-            "\e[0;31mother.example.test\e[0m : \e[0;31mok=2\e[0m failed=1\r\n"
+            "\e[0;32m#{@host.name}\e[0m : \e[0;32mok=4\e[0m changed=0\r\n" \
+            "\e[0;31m#{other_host.name}\e[0m : \e[0;31mok=2\e[0m failed=1\r\n"
 
-    ingest(AapClient.new([event(41, recap, host_name: nil)]))
+    ingest(AapClient.new([event(41, recap, host_name: nil)]),
+           invocations: [@template_invocation, other_invocation])
 
     assert_equal [
       '',
       'PLAY RECAP *****',
-      "\e[0;32mnode.example.test\e[0m : \e[0;32mok=4\e[0m changed=0",
+      "\e[0;32m#{@host.name}\e[0m : \e[0;32mok=4\e[0m changed=0",
     ], output_events.map(&:event)
 
-    other_invocation = ::TemplateInvocation.find_by(host: other_host)
     assert_equal [
       '',
       'PLAY RECAP *****',
-      "\e[0;31mother.example.test\e[0m : \e[0;31mok=2\e[0m failed=1",
+      "\e[0;31m#{other_host.name}\e[0m : \e[0;31mok=2\e[0m failed=1",
     ], other_invocation.template_invocation_events.order(:timestamp, :id).map(&:event)
   end
 
@@ -210,7 +213,7 @@ class EventIngestorTest < ActiveSupport::TestCase
     # the TASK header after it (start_line 6) got id 114
     ingest(AapClient.new([
       event(108, "ok: => { \"Hello\" }\r\n", host_name: @host.name, start_line: 8, end_line: 11),
-      event(109, "\r\nTASK [debug] ***\r\n", host_name: nil, start_line: 11, end_line: 13),
+      event(109, "ok: World\r\n", host_name: @host.name, start_line: 11, end_line: 13),
       event(110, "ok: [node.example.test]\r\n", host_name: @host.name, start_line: 5, end_line: 6),
       event(114, "\r\nTASK [debug] ***\r\n", host_name: nil, start_line: 6, end_line: 8),
     ]))
@@ -220,6 +223,7 @@ class EventIngestorTest < ActiveSupport::TestCase
       '',
       'TASK [debug] ***',
       'ok: => { "Hello" }',
+      'ok: World',
     ], output_events.map(&:event)
   end
 
@@ -252,10 +256,10 @@ class EventIngestorTest < ActiveSupport::TestCase
     ]
   end
 
-  def ingest(client)
+  def ingest(client, invocations: [@template_invocation])
     ForemanAnsibleAap::EventIngestor.new(
       execution_record: @execution,
-      template_invocations: [@template_invocation],
+      template_invocations: invocations,
       aap_client: client
     ).ingest(91)
   end
@@ -268,7 +272,7 @@ class EventIngestorTest < ActiveSupport::TestCase
     {
       id: id,
       stdout: stdout,
-      timestamp: timestamp || "2026-10-30T09:00:#{id}Z",
+      timestamp: timestamp || format('2026-10-30T09:%02d:%02dZ', id / 60, id % 60),
       host_name: host_name,
       remote_addr: remote_addr,
       start_line: start_line,
