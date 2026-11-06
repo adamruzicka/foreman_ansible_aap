@@ -59,17 +59,6 @@ module Actions
         output.fetch(:aap_polling_interval, 1)
       end
 
-      def record_output(result)
-        output.update(
-          aap_job_id: result.job_id,
-          aap_job_url: result.job_url,
-          aap_commit_sha: result.commit_sha,
-          aap_scm_ref: result.scm_ref,
-          aap_output_incomplete: result.output_incomplete,
-          aap_output_failure_diagnostic: result.output_failure_diagnostic
-        )
-      end
-
       # AAP cancellation belongs to the aggregate execution. Do not forward
       # Dynflow cancellation to the lightweight host tasks: they wait for the
       # authoritative aggregate outcome instead.
@@ -144,7 +133,7 @@ module Actions
         Lifecycle.transition!(
           execution_record,
           :aggregate_state,
-          to: ::ForemanAnsibleAap::Lifecycle::Aggregate::SKIPPED,
+          to: Lifecycle::Aggregate::SKIPPED,
           aggregate_error: nil
         )
       end
@@ -153,7 +142,7 @@ module Actions
         Lifecycle.transition!(
           execution_record,
           :aggregate_state,
-          to: ::ForemanAnsibleAap::Lifecycle::Aggregate::FAILED,
+          to: Lifecycle::Aggregate::FAILED,
           aggregate_error: error.message
         )
         output[:aggregate_error] = error.message
@@ -181,11 +170,14 @@ module Actions
         Lifecycle.transition!(
           execution_record,
           :aggregate_state,
-          to: ::ForemanAnsibleAap::Lifecycle::Aggregate::RUNNING,
+          to: Lifecycle::Aggregate::RUNNING,
           aggregate_error: nil
         )
       end
 
+      # The AAP job coordinates and output diagnostics live on the persisted
+      # Execution record (surfaced through JobInvocation#aap_diagnostics), not
+      # in the Dynflow output, so there is exactly one copy of each.
       def finish_aggregate!(result)
         Lifecycle.transition!(
           execution_record,
@@ -193,7 +185,6 @@ module Actions
           to: aggregate_state_for(result),
           aggregate_error: nil
         )
-        record_output(result)
         complete_aggregate
       end
 
