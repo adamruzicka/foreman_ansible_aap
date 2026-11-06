@@ -5,6 +5,8 @@ module Actions
     class RunHostJob < Actions::EntryAction
       class PreparationError < StandardError; end
 
+      Lifecycle = ::ForemanAnsibleAap::Lifecycle
+
       Poll = Algebrick.atom
 
       # Preparation failures must remain durable even though the action raises to
@@ -38,10 +40,8 @@ module Actions
 
       def run(_event = nil)
         record = host_execution.reload
-        prepare!(record) if record.preparation_state == ::ForemanAnsibleAap::Lifecycle::Preparation::PENDING
-        if record.preparation_state == ::ForemanAnsibleAap::Lifecycle::Preparation::FAILED
-          raise PreparationError, record.preparation_error
-        end
+        prepare!(record) if record.preparation_pending?
+        raise PreparationError, record.preparation_error if record.preparation_failed?
 
         finish_or_wait(record)
       end
@@ -80,11 +80,11 @@ module Actions
 
       def finish_or_wait(record)
         case record.result_state
-        when ::ForemanAnsibleAap::Lifecycle::Result::SUCCESSFUL
+        when Lifecycle::Result::SUCCESSFUL
           nil
-        when ::ForemanAnsibleAap::Lifecycle::Result::FAILED
+        when Lifecycle::Result::FAILED
           raise PreparationError, record.result_error
-        when ::ForemanAnsibleAap::Lifecycle::Result::CANCELLED
+        when Lifecycle::Result::CANCELLED
           error! ::ForemanTasks::Task::TaskCancelledException.new(_('Task cancelled'))
         else
           suspend
@@ -98,15 +98,15 @@ module Actions
       def prepare!(record)
         verify_permissions(record.host, record.template_invocation)
         validate_local_preparation!(record.template_invocation)
-        transition_preparation!(record, ::ForemanAnsibleAap::Lifecycle::Preparation::PREPARED)
+        transition_preparation!(record, Lifecycle::Preparation::PREPARED)
       rescue StandardError => e
         message = e.message.presence || e.class.name
-        transition_preparation!(record, ::ForemanAnsibleAap::Lifecycle::Preparation::FAILED, message)
+        transition_preparation!(record, Lifecycle::Preparation::FAILED, message)
         raise PreparationError, message
       end
 
       def transition_preparation!(record, state, error = nil)
-        ::ForemanAnsibleAap::Lifecycle.transition!(
+        Lifecycle.transition!(
           record, :preparation_state, to: state, preparation_error: error
         )
       end

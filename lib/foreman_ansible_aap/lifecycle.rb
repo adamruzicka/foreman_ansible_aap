@@ -52,6 +52,15 @@ module ForemanAnsibleAap
       result_state: Result::STATES,
     }.freeze
 
+    # Maps a state list (e.g. Aggregate::STATES) onto an ActiveRecord `enum`
+    # values hash: { pending: 'pending', ... }
+    def self.enum_values(states)
+      states.index_by(&:to_sym)
+    end
+
+    # Transitions the given state column, guarding against typos before the
+    # record's `enum` validation would raise anyway. Keeps the guard for plain
+    # non-ActiveRecord doubles used in tests.
     def self.transition!(record, attribute, to:, **attributes)
       states = STATES_BY_ATTRIBUTE.fetch(attribute) do
         raise ArgumentError, "Unknown lifecycle attribute #{attribute.inspect}"

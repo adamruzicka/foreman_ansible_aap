@@ -27,7 +27,7 @@ module ForemanAnsibleAap
     end
 
     def settled?(host)
-      host_executions.fetch(host.name).result_state != Lifecycle::Result::PENDING
+      !host_executions.fetch(host.name).result_pending?
     end
 
     private
@@ -36,7 +36,7 @@ module ForemanAnsibleAap
 
     def settle(record, exit_status:, result_state:, diagnostic: nil, error: nil)
       record.with_lock do
-        return unless record.result_state == Lifecycle::Result::PENDING
+        return unless record.result_pending?
 
         invocation = record.template_invocation
         create_event(invocation, 'aap-host-summary-diagnostic', diagnostic, 'stdout') if diagnostic

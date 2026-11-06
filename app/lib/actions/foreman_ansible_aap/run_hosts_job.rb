@@ -5,6 +5,9 @@ module Actions
     class RunHostsJob < Actions::ActionWithSubPlans
       include Actions::RecurringAction
 
+      Lifecycle = ::ForemanAnsibleAap::Lifecycle
+      AggregateExecution = ::ForemanAnsibleAap::AggregateExecution
+
       middleware.use Actions::Middleware::BindJobInvocation
       middleware.do_not_use Dynflow::Middleware::Common::Transaction
 
@@ -83,10 +86,10 @@ module Actions
 
       def check_for_errors!
         case execution_record.aggregate_state
-        when ::ForemanAnsibleAap::Lifecycle::Aggregate::FAILED
-          raise ::ForemanAnsibleAap::AggregateExecution::ExecutionError,
+        when Lifecycle::Aggregate::FAILED
+          raise AggregateExecution::ExecutionError,
             execution_record.aggregate_error
-        when ::ForemanAnsibleAap::Lifecycle::Aggregate::CANCELLED
+        when Lifecycle::Aggregate::CANCELLED
           raise ::ForemanTasks::Task::TaskCancelledException, _('Task cancelled')
         else
           super
@@ -134,13 +137,11 @@ module Actions
       end
 
       def prepared_host_records
-        host_execution_records.select do |record|
-          record.preparation_state == ::ForemanAnsibleAap::Lifecycle::Preparation::PREPARED
-        end
+        execution_record.host_executions.preparation_prepared.includes(:host, :template_invocation).to_a
       end
 
       def skip_aggregate
-        ::ForemanAnsibleAap::Lifecycle.transition!(
+        Lifecycle.transition!(
           execution_record,
           :aggregate_state,
           to: ::ForemanAnsibleAap::Lifecycle::Aggregate::SKIPPED,
@@ -149,7 +150,7 @@ module Actions
       end
 
       def record_aggregate_failure(error)
-        ::ForemanAnsibleAap::Lifecycle.transition!(
+        Lifecycle.transition!(
           execution_record,
           :aggregate_state,
           to: ::ForemanAnsibleAap::Lifecycle::Aggregate::FAILED,
@@ -160,7 +161,7 @@ module Actions
 
       def execute_aggregate(prepared_records)
         start_aggregate!
-        step = ::ForemanAnsibleAap::AggregateExecution.new(
+        step = AggregateExecution.new(
           job_invocation: job_invocation,
           execution_record: execution_record,
           prepared_hosts: prepared_records.map(&:host),
@@ -174,10 +175,10 @@ module Actions
       end
 
       def start_aggregate!
-        pending = ::ForemanAnsibleAap::Lifecycle::Aggregate::PENDING
+        pending = Lifecycle::Aggregate::PENDING
         return unless execution_record.aggregate_state == pending
 
-        ::ForemanAnsibleAap::Lifecycle.transition!(
+        Lifecycle.transition!(
           execution_record,
           :aggregate_state,
           to: ::ForemanAnsibleAap::Lifecycle::Aggregate::RUNNING,
@@ -186,7 +187,7 @@ module Actions
       end
 
       def finish_aggregate!(result)
-        ::ForemanAnsibleAap::Lifecycle.transition!(
+        Lifecycle.transition!(
           execution_record,
           :aggregate_state,
           to: aggregate_state_for(result),
@@ -197,10 +198,10 @@ module Actions
       end
 
       def aggregate_state_for(result)
-        if result.state == ::ForemanAnsibleAap::Lifecycle::Result::CANCELLED
-          ::ForemanAnsibleAap::Lifecycle::Aggregate::CANCELLED
+        if result.state == Lifecycle::Result::CANCELLED
+          Lifecycle::Aggregate::CANCELLED
         else
-          ::ForemanAnsibleAap::Lifecycle::Aggregate::SUCCESSFUL
+          Lifecycle::Aggregate::SUCCESSFUL
         end
       end
 
@@ -219,9 +220,7 @@ module Actions
 
       def preparation_complete?
         records = host_execution_records
-        records.size == total_count && records.none? do |record|
-          record.preparation_state == ::ForemanAnsibleAap::Lifecycle::Preparation::PENDING
-        end
+        records.size == total_count && records.none?(&:preparation_pending?)
       end
 
       def host_execution_records

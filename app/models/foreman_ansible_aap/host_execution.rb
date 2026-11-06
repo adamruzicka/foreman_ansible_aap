@@ -10,9 +10,8 @@ module ForemanAnsibleAap
 
     validates :host_id, uniqueness: { scope: :execution_id }
     validates :template_invocation_id, uniqueness: true
-    validates :preparation_state, inclusion: { in: Lifecycle::Preparation::STATES }
-    validates :result_state, inclusion: { in: Lifecycle::Result::STATES }
 
-    scope :prepared, -> { where(preparation_state: Lifecycle::Preparation::PREPARED) }
+    enum preparation_state: Lifecycle.enum_values(Lifecycle::Preparation::STATES), _prefix: :preparation
+    enum result_state: Lifecycle.enum_values(Lifecycle::Result::STATES), _prefix: :result
   end
 end
