@@ -58,8 +58,10 @@ module ForemanAnsibleAap
 
     # Play-level events (play/task banners, the recap) carry no host in AAP,
     # but the per-host output view only reads that host's invocation events, so
-    # they must be fanned out to every invocation to remain visible. Events for
-    # hosts outside the invocation set (e.g. delegate targets) stay diagnostic.
+    # they must be fanned out to every invocation to remain visible. The play
+    # recap lists every host; each invocation only keeps its own recap line.
+    # Events for hosts outside the invocation set (e.g. delegate targets) stay
+    # diagnostic.
     def persist_event(template_invocation, job_id, event)
       return persist_host_output(template_invocation, job_id, event) if template_invocation
       return fan_out_hostless_output(job_id, event) if event[:host_name].nil? && template_invocations.any?
@@ -69,13 +71,17 @@ module ForemanAnsibleAap
 
     def fan_out_hostless_output(job_id, event)
       template_invocations.each_value do |invocation|
-        persist_host_output(invocation, job_id, event)
+        persist_host_output(invocation, job_id, event, other_hosts: other_host_names(invocation))
       end
     end
 
-    def persist_host_output(template_invocation, job_id, event)
+    def other_host_names(invocation)
+      template_invocations.keys - [invocation.host.name]
+    end
+
+    def persist_host_output(template_invocation, job_id, event, other_hosts: [])
       stdout = event.fetch(:stdout, '')
-      chunks = split_stdout(stdout)
+      chunks = split_stdout(stdout, other_hosts: other_hosts)
       return if chunks.empty?
 
       timestamp = event_timestamp(template_invocation, event)
@@ -90,14 +96,25 @@ module ForemanAnsibleAap
     # The output viewer renders each stored event as one numbered line, so
     # chunks must align with the stdout's own line boundaries. AAP emits CRLF
     # line endings and shows a blank line before every play/task heading; both
-    # are normalized so the rendered output matches AAP exactly. Lines longer
-    # than OUTPUT_CHUNK_SIZE are wrapped, but never in the middle of an ANSI
-    # escape sequence, which would render as garbage such as "[0;32m".
-    def split_stdout(stdout)
+    # are normalized so the rendered output matches AAP exactly. Recap lines
+    # naming another host of this invocation are dropped so each host's output
+    # shows only its own recap, like a per-host ansible run. Lines longer than
+    # OUTPUT_CHUNK_SIZE are wrapped, but never in the middle of an ANSI escape
+    # sequence, which would render as garbage such as "[0;32m".
+    def split_stdout(stdout, other_hosts: [])
       lines = stdout.gsub(/\r\n/, "\n").gsub(/\r/, "\n")
                    .sub(/\A\n+/, '').split("\n")
       lines.unshift('') if lines.first&.match?(HEADING_PATTERN)
+      lines = lines.reject { |line| recap_line_for?(line, other_hosts) } if other_hosts.any?
       lines.flat_map { |line| wrap_line(line) }
+    end
+
+    # Recap lines look like "\e[0;32mhost.example.com\e[0m : ok=4 changed=0 ...";
+    # the host name and the separator carry ANSI color sequences.
+    def recap_line_for?(line, other_hosts)
+      other_hosts.any? do |host|
+        line.match?(/\A(?:\e\[[0-9;]*m)*#{Regexp.escape(host)}(?:\e\[[0-9;]*m)*\s*:/)
+      end
     end
 
     def wrap_line(line)

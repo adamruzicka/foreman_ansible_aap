@@ -159,6 +159,29 @@ class EventIngestorTest < ActiveSupport::TestCase
     assert_equal ['ok: Hello', 'ok: hostname'], output_events.map(&:event)
   end
 
+  test 'fans the play recap out keeping only the invoking host recap line' do
+    other_host = FactoryBot.create(:host, name: 'other.example.test')
+    FactoryBot.create(:template_invocation, job_invocation: @job_invocation, host: other_host)
+    recap = "\r\nPLAY RECAP *****\r\n" \
+            "\e[0;32mnode.example.test\e[0m : \e[0;32mok=4\e[0m changed=0\r\n" \
+            "\e[0;31mother.example.test\e[0m : \e[0;31mok=2\e[0m failed=1\r\n"
+
+    ingest(AapClient.new([event(41, recap, host_name: nil)]))
+
+    assert_equal [
+      '',
+      'PLAY RECAP *****',
+      "\e[0;32mnode.example.test\e[0m : \e[0;32mok=4\e[0m changed=0",
+    ], output_events.map(&:event)
+
+    other_invocation = ::TemplateInvocation.find_by(host: other_host)
+    assert_equal [
+      '',
+      'PLAY RECAP *****',
+      "\e[0;31mother.example.test\e[0m : \e[0;31mok=2\e[0m failed=1",
+    ], other_invocation.template_invocation_events.order(:timestamp, :id).map(&:event)
+  end
+
   test 'does not drop lower-id events that follow a higher-id event in line order' do
     # job 94 pattern: event 132 (start_line 13) is persisted before events
     # 128/126/130 (start_line 16/18/21); the cursor must not make the ingestor
