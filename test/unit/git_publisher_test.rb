@@ -34,6 +34,8 @@ class GitPublisherTest < ActiveSupport::TestCase
 
     assert_equal first_sha, matching_sha
     assert_equal first_sha, remote_ref_sha
+    foreman_branches = git('--git-dir', @remote, 'show-ref').lines.select { |line| line.include?('refs/heads/foreman/') }
+    assert_empty foreman_branches, 'publication must not create branches'
 
     error = assert_raises(ForemanAnsibleAap::GitPublisher::PublicationError) do
       publisher.publish(publication_attributes("---\n- hosts: tampered\n"))
@@ -89,7 +91,7 @@ class GitPublisherTest < ActiveSupport::TestCase
   end
 
   def remote_ref_sha
-    git('--git-dir', @remote, 'rev-parse', 'refs/heads/foreman/production/job-invocation-42').strip
+    git('--git-dir', @remote, 'rev-parse', 'refs/tags/foreman/production/job-invocation-42').strip
   end
 
   def advance_base_ref

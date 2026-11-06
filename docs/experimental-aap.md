@@ -58,14 +58,17 @@ Template and in `aap_generated_playbook_path`. Absolute paths, `..` path
 components, and symbolic links in the destination path are rejected.
 
 Give Foreman a repository credential that can clone the base ref, inspect
-remote refs, and create branches. Give AAP a different read credential for its
+remote refs, and create tags. Give AAP a different read credential for its
 Project. Do not reuse the AAP service token or an AAP machine credential for
 Git. Foreman supplies Git credentials through a non-interactive askpass helper;
 it does not place them on the Git command line.
 
-Each invocation is branched from the configured base ref and published under
-the deterministic namespace
-`foreman/<instance-id>/job-invocation-<id>`. Use a stable, unique instance ID
+Each invocation is branched from the configured base ref and published as an
+immutable tag under the deterministic namespace
+`foreman/<instance-id>/job-invocation-<id>`. Tags, unlike branches, are not
+expected to move, and they are fetched by AAP's default fetch refspec so the
+Job Template can check the artifact out through `scm_branch`. Use a stable,
+unique instance ID
 made from conservative Git-ref characters, for example `lab-foreman-01`.
 Foreman records the repository URL, generated ref, and commit SHA.
 
@@ -76,7 +79,10 @@ conflict. Repository provisioning, access policy, branch protection,
 credential rotation, retention, cleanup, backup, and historical artifact
 availability are administrator responsibilities. Foreman does not retain a
 second copy of the rendered playbook and cannot guarantee that an old artifact
-will remain available after repository cleanup.
+will remain available after repository cleanup. In particular, protecting the
+published tags against deletion or rewriting is an administrator
+responsibility, since Git itself will happily move or delete an unprotected
+tag when forced.
 
 ## Provision the AAP 2.6 resources
 

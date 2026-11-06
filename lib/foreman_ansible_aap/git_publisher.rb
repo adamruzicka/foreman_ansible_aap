@@ -37,7 +37,7 @@ module ForemanAnsibleAap
         end
 
         begin
-          run(environment, 'git', 'push', 'origin', "HEAD:refs/heads/#{attributes.fetch(:ref)}", chdir: repository)
+          run(environment, 'git', 'push', 'origin', "HEAD:refs/tags/#{attributes.fetch(:ref)}", chdir: repository)
           commit_sha
         rescue PublicationError
           # A concurrent publisher may have won the create-only race. Re-read the
@@ -64,10 +64,16 @@ module ForemanAnsibleAap
 
     def validate_ref!(ref)
       return if ref.match?(%r{\A[A-Za-z0-9][A-Za-z0-9._/-]*\z}) &&
-                !ref.include?('..') && !ref.end_with?('/') && !ref.include?('//')
+                !ref.include?('..') && !ref.end_with?('/') && !ref.include?('//') &&
+                !ref.end_with?('.lock') && !ref.include?('.lock/')
 
       raise PublicationError, "Generated Git ref is invalid: #{ref.inspect}"
     end
+
+    # Tag refs are fetched by AAP's default fetch refspec (unlike refs in
+    # custom namespaces) and are not expected to move, which keeps the
+    # per-invocation artifact immutable from AAP's point of view.
+    TAG_REF = ->(ref) { "refs/tags/#{ref}" }
 
     def credential_environment(directory, attributes)
       askpass = File.join(directory, 'askpass')
@@ -99,12 +105,12 @@ module ForemanAnsibleAap
     end
 
     def remote_ref_sha(environment, repository, ref)
-      output = run(environment, 'git', 'ls-remote', '--heads', 'origin', "refs/heads/#{ref}", chdir: repository)
+      output = run(environment, 'git', 'ls-remote', '--tags', 'origin', TAG_REF.call(ref), chdir: repository)
       output.split.first
     end
 
     def matching_existing_content!(environment, repository, ref, existing_sha, path, expected_content)
-      run(environment, 'git', 'fetch', 'origin', "refs/heads/#{ref}", chdir: repository)
+      run(environment, 'git', 'fetch', 'origin', TAG_REF.call(ref), chdir: repository)
       existing_content = begin
         run(environment, 'git', 'show', "FETCH_HEAD:#{path}", chdir: repository)
       rescue PublicationError
