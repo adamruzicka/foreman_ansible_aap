@@ -144,7 +144,7 @@ module ForemanAnsibleAap
       job_id = execution_value(:aap_job_id)
       status = poll_status(job_id)
       transition_workflow!(Lifecycle::Workflow::POLLING, aap_status: status)
-      stragglers = ingest_output(job_id)
+      ingest_output(job_id)
 
       if Lifecycle::AapStatus::ACTIVE.include?(status)
         clear_polling_failures!
@@ -152,7 +152,7 @@ module ForemanAnsibleAap
         return incomplete
       end
 
-      finish_terminal_job(job_id, status, stragglers: stragglers)
+      finish_terminal_job(job_id, status)
     end
 
     def poll_status(job_id)
@@ -171,8 +171,8 @@ module ForemanAnsibleAap
       aap_client.cancel!(job_id)
     end
 
-    def finish_terminal_job(job_id, status, stragglers: 0)
-      drain_output(job_id, stragglers: stragglers)
+    def finish_terminal_job(job_id, status)
+      drain_output(job_id)
       cancelled = Lifecycle::AapStatus::CANCELLED.include?(status)
       failed_hosts = settle_hosts(job_id, cancelled: cancelled)
       clear_polling_failures!
@@ -239,15 +239,21 @@ module ForemanAnsibleAap
         "AAP job coordinates could not be persisted; AAP might still be executing: #{e.message}"
     end
 
-    # AAP can flip a job to a terminal status before its event index exposes
-    # the final events, which would truncate the stored output (observed on
-    # multi-host jobs). When the terminal poll still fetched events, keep
-    # ingesting until a fetch observes nothing new.
-    def drain_output(job_id, stragglers:, max_attempts: 3)
+    # AAP flips a job to a terminal status up to a few seconds before its
+    # event index exposes the final events, so the terminal poll can observe
+    # a finished job and an empty (or partial) event stream. Keep ingesting
+    # until two consecutive fetches observe nothing new.
+    def drain_output(job_id, max_attempts: 5)
       attempts = 0
-      while stragglers.positive? && (attempts += 1) < max_attempts
+      consecutive_empty = 0
+      while attempts < max_attempts && consecutive_empty < 2
         sleeper.call(1)
-        stragglers = ingest_output(job_id)
+        if ingest_output(job_id).positive?
+          consecutive_empty = 0
+        else
+          consecutive_empty += 1
+        end
+        attempts += 1
       end
     end
 

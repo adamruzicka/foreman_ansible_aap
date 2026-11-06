@@ -323,7 +323,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     assert result.complete?
     assert_equal 'cancelled', result.result.state
     assert_equal [91, 91, 91], aap_client.status_requests
-    assert_equal [91, 91, 91], event_ingestor.jobs
+    assert_equal [91, 91, 91, 91, 91], event_ingestor.jobs
     assert_equal [hosts[0]], settler.successful_hosts
     assert_equal [[hosts[1], 'AAP reported a failed result for failed.example.test']], settler.failed_hosts
     assert_equal [hosts[2]], settler.cancelled_hosts
@@ -406,6 +406,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
         aap_client: aap_client,
         event_ingestor: event_ingestor,
         result_settler: settler,
+        sleeper: Sleeper.new,
       }
     ).call
 
@@ -439,13 +440,13 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       },
     }, aap_client.launches.first)
     assert_equal [91, 91, 91, 91], aap_client.status_requests
-    assert_equal [91, 91, 91, 91], event_ingestor.jobs
+    assert_equal [91, 91, 91, 91, 91, 91], event_ingestor.jobs
     assert_equal %i[
       preflight launch
       status_queued events
       status_waiting events
       status_running events
-      status_successful events
+      status_successful events events events
     ], trace
     assert_equal [91], aap_client.summary_requests
     assert_equal hosts, settler.successful_hosts
@@ -483,9 +484,10 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     )
     trace = []
     aap_client = AapClient.new(execution_record, trace)
-    # the terminal poll still sees events (AAP flips status before its event
-    # index is complete), the first drain pass finds more, the second none
-    event_ingestor = EventIngestor.new(trace, fetch_counts: [0, 0, 0, 3, 2, 0])
+    # AAP flips the job to successful before its event index is complete: the
+    # terminal poll fetches nothing, the first drain pass finds events, the
+    # second finds the rest, then two consecutive empty passes end the drain
+    event_ingestor = EventIngestor.new(trace, fetch_counts: [0, 0, 0, 0, 3, 2, 0, 0])
     settler = ResultSettler.new
     sleeper = Sleeper.new
 
@@ -504,8 +506,8 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       }
     ).call
 
-    assert_equal [91, 91, 91, 91, 91, 91], event_ingestor.jobs
-    assert_equal [1, 1], sleeper.durations
+    assert_equal [91] * 8, event_ingestor.jobs
+    assert_equal [1, 1, 1, 1], sleeper.durations
     assert_equal hosts, settler.successful_hosts
   end
 
@@ -780,7 +782,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       execution_record, hosts, aap_client, settler, sleeper: sleeper
     ).call
 
-    assert_equal [1, 2, 4, 8, 16, 30], sleeper.durations
+    assert_equal [1, 2, 4, 8, 16, 30, 1, 1], sleeper.durations
     assert_equal hosts, settler.successful_hosts
     assert_empty settler.failed_hosts
     assert_equal 0, execution_record.attributes[:polling_failure_count]
@@ -836,7 +838,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       execution_record, [host], aap_client, settler, sleeper: sleeper
     ).call
 
-    assert_equal [1, 2], sleeper.durations
+    assert_equal [1, 2, 1, 1], sleeper.durations
     assert_equal [host], settler.successful_hosts
     assert_equal 0, execution_record.attributes[:polling_failure_count]
   end
@@ -894,7 +896,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     assert_empty settler.failed_hosts
     assert execution_record.attributes[:output_incomplete]
     assert_equal output_error.message, execution_record.attributes[:output_failure_diagnostic]
-    assert_equal [91, 91], event_ingestor.jobs
+    assert_equal [91, 91, 91, 91], event_ingestor.jobs
     assert result.output_incomplete
     assert_equal output_error.message, result.output_failure_diagnostic
   end
@@ -924,7 +926,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
     assert_empty renderer.invocations
     assert_empty aap_client.preflights
     assert_empty aap_client.launches
-    assert_equal [8], sleeper.durations
+    assert_equal [8, 1, 1], sleeper.durations
     assert_equal 91, result.job_id
     assert_equal [host], settler.successful_hosts
   end
