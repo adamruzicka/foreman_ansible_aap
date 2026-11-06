@@ -12,12 +12,15 @@ module ForemanAnsibleAap
       @aap_client = aap_client
     end
 
+    # Returns the number of events fetched from AAP (0 when nothing new), so
+    # callers can drain stragglers after a job reaches a terminal status.
     def ingest(job_id)
       events = aap_client.job_events(job_id, after_id: execution_record.event_cursor)
-      return if events.empty?
+      return 0 if events.empty?
 
       sort_events(events).each { |event| persist(job_id, event) }
       advance_cursor(events)
+      events.length
     end
 
     # AAP assigns event ids in arrival order, not output order, and events

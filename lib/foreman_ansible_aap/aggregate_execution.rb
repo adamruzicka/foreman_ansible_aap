@@ -144,7 +144,7 @@ module ForemanAnsibleAap
       job_id = execution_value(:aap_job_id)
       status = poll_status(job_id)
       transition_workflow!(Lifecycle::Workflow::POLLING, aap_status: status)
-      ingest_output(job_id)
+      stragglers = ingest_output(job_id)
 
       if Lifecycle::AapStatus::ACTIVE.include?(status)
         clear_polling_failures!
@@ -152,7 +152,7 @@ module ForemanAnsibleAap
         return incomplete
       end
 
-      finish_terminal_job(job_id, status)
+      finish_terminal_job(job_id, status, stragglers: stragglers)
     end
 
     def poll_status(job_id)
@@ -171,7 +171,8 @@ module ForemanAnsibleAap
       aap_client.cancel!(job_id)
     end
 
-    def finish_terminal_job(job_id, status)
+    def finish_terminal_job(job_id, status, stragglers: 0)
+      drain_output(job_id, stragglers: stragglers)
       cancelled = Lifecycle::AapStatus::CANCELLED.include?(status)
       failed_hosts = settle_hosts(job_id, cancelled: cancelled)
       clear_polling_failures!
@@ -238,6 +239,18 @@ module ForemanAnsibleAap
         "AAP job coordinates could not be persisted; AAP might still be executing: #{e.message}"
     end
 
+    # AAP can flip a job to a terminal status before its event index exposes
+    # the final events, which would truncate the stored output (observed on
+    # multi-host jobs). When the terminal poll still fetched events, keep
+    # ingesting until a fetch observes nothing new.
+    def drain_output(job_id, stragglers:, max_attempts: 3)
+      attempts = 0
+      while stragglers.positive? && (attempts += 1) < max_attempts
+        sleeper.call(1)
+        stragglers = ingest_output(job_id)
+      end
+    end
+
     def settle_hosts(job_id, cancelled: false)
       summaries = with_polling_retries { aap_client.host_summaries(job_id) }
       failed_hosts = HostOutcomeReconciler.new(
@@ -257,6 +270,7 @@ module ForemanAnsibleAap
         output_incomplete: true,
         output_failure_diagnostic: e.message
       )
+      0
     end
 
     def with_polling_retries

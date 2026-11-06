@@ -55,6 +55,34 @@ class ResultSettlerTest < ActiveSupport::TestCase
     assert_equal '1', template_invocation.template_invocation_events.find_by(event_type: 'exit').event
   end
 
+  test 'exit and diagnostic events render after all stored output lines' do
+    invocation = FactoryBot.create(:job_invocation, :with_template)
+    template_invocation = invocation.pattern_template_invocations.first.deep_clone
+    host = FactoryBot.create(:host)
+    template_invocation.update!(host: host)
+    execution = ForemanAnsibleAap::Execution.create!(job_invocation: invocation)
+    record = ForemanAnsibleAap::HostExecution.create!(
+      execution: execution,
+      host: host,
+      template_invocation: template_invocation,
+      preparation_state: 'prepared'
+    )
+    # synthetic counter-based output timestamps can run past wall-clock time
+    future = Time.zone.now + 5.minutes
+    template_invocation.template_invocation_events.create!(
+      external_id: 'aap-job-91-event-1-chunk-0',
+      event: 'PLAY RECAP',
+      event_type: 'stdout',
+      timestamp: future
+    )
+
+    ForemanAnsibleAap::ResultSettler.new([record]).success!(host)
+
+    exit_event = template_invocation.template_invocation_events.find_by(event_type: 'exit')
+    assert exit_event.timestamp > future,
+           'exit event must sort after synthetic output timestamps'
+  end
+
   test 'does not corrupt a persisted host outcome when settlement is replayed after restart' do
     invocation = FactoryBot.build(:job_invocation)
     template_invocation = FactoryBot.build(

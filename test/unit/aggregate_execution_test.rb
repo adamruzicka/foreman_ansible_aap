@@ -146,10 +146,11 @@ class AggregateExecutionTest < ActiveSupport::TestCase
   class EventIngestor
     attr_reader :jobs
 
-    def initialize(trace, failures: [])
+    def initialize(trace, failures: [], fetch_counts: [])
       @trace = trace
       @jobs = []
       @failures = failures
+      @fetch_counts = fetch_counts
     end
 
     def ingest(job_id)
@@ -158,6 +159,7 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       raise failure if failure
 
       @trace << :events
+      @fetch_counts.shift || 0
     end
   end
 
@@ -459,6 +461,52 @@ class AggregateExecutionTest < ActiveSupport::TestCase
       aap_status: 'successful',
     }, execution_record.attributes)
     assert_equal 91, result.job_id
+  end
+
+  test 'drains late AAP events after the job reaches a terminal status' do
+    invocation = Invocation.new(42)
+    execution_record = Record.new
+    hosts = [Host.new('node-1.example.test'), Host.new('node-2.example.test')]
+    configuration = ForemanAnsibleAap::Configuration.new(
+      controller_url: 'https://aap.example.test',
+      service_token: 'controller-secret',
+      ca_bundle: '/etc/pki/aap-ca.pem',
+      job_template_id: 7,
+      inventory_id: 8,
+      project_id: 9,
+      repository_url: 'https://git.example.test/generated.git',
+      base_ref: 'main',
+      playbook_path: 'generated/foreman.yml',
+      instance_id: 'foreman-prod',
+      git_username: 'foreman',
+      git_password: 'git-secret'
+    )
+    trace = []
+    aap_client = AapClient.new(execution_record, trace)
+    # the terminal poll still sees events (AAP flips status before its event
+    # index is complete), the first drain pass finds more, the second none
+    event_ingestor = EventIngestor.new(trace, fetch_counts: [0, 0, 0, 3, 2, 0])
+    settler = ResultSettler.new
+    sleeper = Sleeper.new
+
+    ForemanAnsibleAap::AggregateExecution.new(
+      job_invocation: invocation,
+      execution_record: execution_record,
+      prepared_hosts: hosts,
+      configuration: configuration,
+      dependencies: {
+        renderer: Renderer.new,
+        publisher: Publisher.new,
+        aap_client: aap_client,
+        event_ingestor: event_ingestor,
+        result_settler: settler,
+        sleeper: sleeper,
+      }
+    ).call
+
+    assert_equal [91, 91, 91, 91, 91, 91], event_ingestor.jobs
+    assert_equal [1, 1], sleeper.durations
+    assert_equal hosts, settler.successful_hosts
   end
 
   test 'fails every prepared host with the same diagnostic after a definitive local or launch failure' do
