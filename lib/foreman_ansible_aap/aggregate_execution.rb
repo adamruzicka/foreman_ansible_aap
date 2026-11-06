@@ -50,6 +50,10 @@ module ForemanAnsibleAap
       @job_url_builder = dependencies.fetch(:job_url_builder) { DEFAULT_JOB_URL_BUILDER }
     end
 
+    # Drives the aggregate workflow to completion by looping over #advance,
+    # backing off between polling retries. The Dynflow action drives #advance
+    # once per tick in production; #call exists so tests and one-shot callers
+    # can run the whole lifecycle synchronously.
     def call
       return Result.new(state: Lifecycle::Result::SUCCESSFUL) if prepared_hosts.empty?
 
@@ -64,9 +68,9 @@ module ForemanAnsibleAap
     def advance
       execution_record.reload
       restore_launched_stage
-      return finish_before_launch if cancellation_requested? && execution_value(:aap_job_id).nil?
+      return finish_before_launch if cancellation_requested? && execution_record.aap_job_id.nil?
 
-      case execution_value(:workflow_state)
+      case execution_record.workflow_state
       when Lifecycle::Workflow::PENDING
         preflight!
         transition_workflow!(Lifecycle::Workflow::PREFLIGHTED)
@@ -86,7 +90,7 @@ module ForemanAnsibleAap
       when Lifecycle::Workflow::RECONCILED
         complete(completed_state)
       else
-        raise ExecutionError, "Unknown aggregate workflow state #{execution_value(:workflow_state).inspect}"
+        raise ExecutionError, "Unknown aggregate workflow state #{execution_record.workflow_state.inspect}"
       end
     rescue PollingRetry => e
       incomplete(retry_after: e.retry_after)
@@ -106,13 +110,13 @@ module ForemanAnsibleAap
 
     def completed_result(state)
       Result.new(
-        job_id: execution_value(:aap_job_id),
-        job_url: execution_value(:aap_job_url),
-        commit_sha: execution_value(:commit_sha),
-        scm_ref: execution_value(:scm_ref),
+        job_id: execution_record.aap_job_id,
+        job_url: execution_record.aap_job_url,
+        commit_sha: execution_record.commit_sha,
+        scm_ref: execution_record.scm_ref,
         state: state,
-        output_incomplete: execution_value(:output_incomplete) || false,
-        output_failure_diagnostic: execution_value(:output_failure_diagnostic)
+        output_incomplete: execution_record.output_incomplete || false,
+        output_failure_diagnostic: execution_record.output_failure_diagnostic
       )
     end
 
@@ -125,7 +129,7 @@ module ForemanAnsibleAap
     end
 
     def completed_state
-      if Lifecycle::AapStatus::CANCELLED.include?(execution_value(:aap_status))
+      if Lifecycle::AapStatus::CANCELLED.include?(execution_record.aap_status)
         Lifecycle::Result::CANCELLED
       else
         Lifecycle::Result::SUCCESSFUL
@@ -133,8 +137,8 @@ module ForemanAnsibleAap
     end
 
     def restore_launched_stage
-      return if execution_value(:aap_job_id).nil?
-      return if Lifecycle::Workflow::LAUNCHED_STATES.include?(execution_value(:workflow_state))
+      return if execution_record.aap_job_id.nil?
+      return if Lifecycle::Workflow::LAUNCHED_STATES.include?(execution_record.workflow_state)
 
       transition_workflow!(Lifecycle::Workflow::LAUNCHED)
     end
@@ -150,7 +154,7 @@ module ForemanAnsibleAap
     end
 
     def observe_remote_job
-      job_id = execution_value(:aap_job_id)
+      job_id = execution_record.aap_job_id
       status = poll_status(job_id)
       transition_workflow!(Lifecycle::Workflow::POLLING, aap_status: status)
       ingest_output(job_id)
@@ -165,14 +169,14 @@ module ForemanAnsibleAap
     end
 
     def poll_status(job_id)
-      normalize_status(with_polling_retries { aap_client.job_status(job_id) })
+      with_polling_retries { aap_client.job_status(job_id) }.to_s
     rescue PollingRetry
       request_remote_cancellation(job_id) if cancellation_requested?
       raise
     end
 
     def request_remote_cancellation(job_id)
-      return if execution_value(:cancellation_sent_at)
+      return if execution_record.cancellation_sent_at
 
       # Record intent before crossing the HTTP boundary. A crash can therefore
       # lose a cancellation request, but can never duplicate one.
@@ -303,7 +307,7 @@ module ForemanAnsibleAap
     def with_polling_retries
       yield
     rescue AapClient::TransientError => e
-      failure_count = execution_value(:polling_failure_count).to_i + 1
+      failure_count = execution_record.polling_failure_count.to_i + 1
       execution_record.update!(
         polling_failure_count: failure_count,
         polling_failure_diagnostic: e.message
@@ -323,19 +327,8 @@ module ForemanAnsibleAap
       end
     end
 
-    def execution_value(attribute)
-      return execution_record.public_send(attribute) if execution_record.respond_to?(attribute)
-
-      execution_record.attributes[attribute]
-    end
-
-    def normalize_status(status)
-      status = status.fetch(:status) if status.respond_to?(:fetch) && status.is_a?(Hash)
-      status.to_s
-    end
-
     def cancellation_requested?
-      execution_value(:cancellation_requested_at).present?
+      execution_record.cancellation_requested_at.present?
     end
 
     def transition_workflow!(state, **attributes)
@@ -343,7 +336,7 @@ module ForemanAnsibleAap
     end
 
     def scm_ref
-      @scm_ref ||= execution_value(:scm_ref) ||
+      @scm_ref ||= execution_record.scm_ref ||
                    "foreman/#{configuration.instance_id}/job-invocation-#{job_invocation.id}"
     end
   end

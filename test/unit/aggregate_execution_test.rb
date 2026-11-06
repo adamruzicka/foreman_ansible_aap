@@ -8,7 +8,8 @@ class AggregateExecutionTest < ActiveSupport::TestCase
   class Record
     OPTIONAL_ATTRIBUTES = %i[
       aap_job_id aap_job_url aap_status cancellation_requested_at cancellation_sent_at
-      commit_sha scm_ref
+      commit_sha scm_ref output_incomplete output_failure_diagnostic
+      polling_failure_count polling_failure_diagnostic
     ].freeze
     attr_reader :attributes
 
